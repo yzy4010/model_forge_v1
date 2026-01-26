@@ -4,6 +4,14 @@ from pathlib import Path
 from typing import Any, Dict, List
 import shutil
 
+# 禁用 Ultralytics 自带的 ClearML 回调，避免与我们平台的 ClearML Task 冲突
+try:
+    from ultralytics.utils import SETTINGS
+    SETTINGS["clearml"] = False
+except Exception:
+    pass
+
+
 from ultralytics import YOLO
 
 
