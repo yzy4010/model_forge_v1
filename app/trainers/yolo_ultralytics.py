@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Tuple
 import shutil
 
 # 禁用 Ultralytics 自带的 ClearML 回调，避免与我们平台的 ClearML Task 冲突
@@ -19,10 +19,38 @@ _ARTIFACT_FILES = ["best.pt", "last.pt", "results.csv", "args.yaml"]
 
 
 def _find_latest_run_dir(project_dir: Path) -> Path:
-    run_dirs = [path for path in project_dir.iterdir() if path.is_dir()]
+    run_dirs = [
+        path
+        for path in project_dir.glob("train*")
+        if path.is_dir() and path.name.startswith("train")
+    ]
     if not run_dirs:
         raise FileNotFoundError(f"No run directories found under {project_dir}")
     return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+
+def _collect_artifacts(run_dir: Path, artifacts_dir: Path) -> Tuple[List[str], List[str]]:
+    artifacts_dir.mkdir(parents=True, exist_ok=True)
+    uploaded: List[str] = []
+    missing: List[str] = []
+
+    file_map = {
+        "best.pt": run_dir / "weights" / "best.pt",
+        "last.pt": run_dir / "weights" / "last.pt",
+        "results.csv": run_dir / "results.csv",
+        "args.yaml": run_dir / "args.yaml",
+    }
+
+    for filename in _ARTIFACT_FILES:
+        src_path = file_map[filename]
+        if not src_path.exists():
+            missing.append(filename)
+            continue
+        dest_path = artifacts_dir / filename
+        shutil.copy2(src_path, dest_path)
+        uploaded.append(filename)
+
+    return uploaded, missing
 
 
 def run_yolo_train(
@@ -34,7 +62,7 @@ def run_yolo_train(
     device: str,
 ) -> Dict[str, Any]:
     outputs_dir.mkdir(parents=True, exist_ok=True)
-    project_dir = outputs_dir / "runs"
+    project_dir = outputs_dir / "raw"
     project_dir.mkdir(parents=True, exist_ok=True)
 
     model = YOLO(model_name_or_path)
@@ -42,39 +70,32 @@ def run_yolo_train(
         "data": data_yaml,
         "project": str(project_dir),
         "name": "train",
+        "exist_ok": False,
         "device": device,
         **hyperparams,
     }
 
-    results = model.train(**train_args)
+    model.train(**train_args)
 
-    run_dir = None
-    if hasattr(results, "save_dir"):
-        run_dir = Path(results.save_dir)
-    if run_dir is None and hasattr(model, "trainer") and hasattr(model.trainer, "save_dir"):
-        run_dir = Path(model.trainer.save_dir)
-    if run_dir is None:
+    try:
         run_dir = _find_latest_run_dir(project_dir)
+    except FileNotFoundError:
+        run_dir = project_dir
 
     artifacts_dir = outputs_dir / "artifacts"
-    artifacts_dir.mkdir(parents=True, exist_ok=True)
-    uploaded: List[str] = []
+    uploaded, missing = _collect_artifacts(run_dir, artifacts_dir)
 
-    for filename in _ARTIFACT_FILES:
-        src_path = run_dir / filename
-        if not src_path.exists():
-            continue
+    for filename in uploaded:
         dest_path = artifacts_dir / filename
-        shutil.copy2(src_path, dest_path)
         try:
             task.upload_artifact(name=filename, artifact_object=str(dest_path))
         except Exception:
             # Keep training result even if ClearML artifact upload fails in offline mode.
             pass
-        uploaded.append(filename)
 
     return {
-        "run_dir": str(run_dir),
-        "artifacts_dir": str(artifacts_dir),
+        "raw_run_dir": str(run_dir.resolve()),
+        "artifacts_dir": str(artifacts_dir.resolve()),
         "artifacts": uploaded,
+        "missing_artifacts": missing,
     }
