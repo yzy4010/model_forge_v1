@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+.idea/
+.vscode/
+outputs/
+runs/
+.clearml/
+**/offline-*.zip
+datasets_local/
+data/
