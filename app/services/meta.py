@@ -21,6 +21,7 @@ def write_meta(
     missing_artifacts: Iterable[str],
     created_at: str,
     finished_at: str,
+    error: Optional[str] = None,
     clearml_offline_note: Optional[str] = None,
 ) -> Path:
     outputs_dir.mkdir(parents=True, exist_ok=True)
@@ -34,6 +35,7 @@ def write_meta(
         "missing_artifacts": list(missing_artifacts),
         "created_at": created_at,
         "finished_at": finished_at,
+        "error": error,
     }
     if clearml_offline_note:
         payload["clearml_offline_note"] = clearml_offline_note
