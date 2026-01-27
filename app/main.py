@@ -457,16 +457,40 @@ def get_train_result(job_id: str) -> dict:
         key=lambda entry: entry["map50"],
         default=None,
     )
+    best_metrics = (
+        {
+            "epoch": best_entry.get("epoch"),
+            "map50": best_entry.get("map50"),
+            "map50_95": best_entry.get("map50_95"),
+            "precision": best_entry.get("precision"),
+            "recall": best_entry.get("recall"),
+        }
+        if best_entry
+        else None
+    )
+    epochs_total = _resolve_epochs_total(job_dir)
+    epochs_done = (
+        len(results)
+        if results
+        else (epochs_total if epochs_total is not None else 0)
+    )
+    dataset = meta.get("dataset") or {}
+    model = meta.get("model") or {}
     bundle_path = _build_result_bundle(job_id, meta)
     return {
         "job_id": job_id,
         "status": record.status,
-        "epochs_total": _resolve_epochs_total(job_dir),
-        "results": results,
-        "best": best_entry,
+        "train_mode": meta.get("train_mode"),
+        "dataset_id": dataset.get("dataset_id"),
+        "model_name_or_path": model.get("name_or_path"),
+        "hyperparams": meta.get("hyperparams") or {},
+        "epochs_total": epochs_total,
+        "epochs_done": epochs_done,
+        "best": best_metrics,
         "artifacts": meta.get("artifacts") or [],
-        "logs_summary": _build_logs_summary(job_id, meta),
         "bundle": {"zip_path": str(bundle_path)},
+        "created_at": meta.get("created_at"),
+        "finished_at": meta.get("finished_at"),
     }
 
 
