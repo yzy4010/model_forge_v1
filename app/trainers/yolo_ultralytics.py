@@ -6,6 +6,7 @@ import contextlib
 import csv
 import json
 import logging
+import re
 import shutil
 import sys
 import threading
@@ -20,6 +21,8 @@ except Exception:
 
 
 from ultralytics import YOLO
+
+from app.services.meta import utc_now_iso
 
 
 _ARTIFACT_FILES = ["best.pt", "last.pt", "results.csv", "args.yaml"]
@@ -45,6 +48,18 @@ _METRIC_FIELDS = {
     "val/cls_loss",
     "val/dfl_loss",
 }
+_ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
+_PROGRESS_LINE_RE = re.compile(
+    r"(?P<epoch>\d+)/(?P<epochs>\d+)\s+"
+    r"(?P<gpu_mem>\S+)\s+"
+    r"(?P<box_loss>[-+]?\d*\.?\d+)\s+"
+    r"(?P<cls_loss>[-+]?\d*\.?\d+)\s+"
+    r"(?P<dfl_loss>[-+]?\d*\.?\d+)\s+"
+    r"(?P<instances>\d+)\s+"
+    r"(?P<imgsz>\d+):"
+    r"(?:\s+(?P<progress_pct>\d+)%\s+)?"
+    r".*?(?P<iter>\d+)/(?P<iters>\d+)"
+)
 
 
 class TeeStream:
@@ -91,6 +106,8 @@ class MetricsWatcher(threading.Thread):
                 if payload:
                     epoch = payload.get("epoch")
                     if epoch is None or epoch != self._last_epoch:
+                        payload["type"] = "metrics"
+                        payload["ts"] = utc_now_iso()
                         with metrics_path.open("a", encoding="utf-8") as handle:
                             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
                         if epoch is not None:
@@ -127,6 +144,70 @@ class MetricsWatcher(threading.Thread):
         return filtered or None
 
 
+class ProgressWatcher(threading.Thread):
+    def __init__(
+        self,
+        logs_dir: Path,
+        poll_interval: float = 0.4,
+        emit_interval: float = 1.0,
+    ) -> None:
+        super().__init__(daemon=True)
+        self._logs_dir = logs_dir
+        self._poll_interval = poll_interval
+        self._emit_interval = emit_interval
+        self._stop_event = threading.Event()
+        self._last_key: Optional[Tuple[int, int]] = None
+        self._last_emit = 0.0
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        train_log_path = self._logs_dir / "train.log"
+        metrics_path = self._logs_dir / "metrics.jsonl"
+        buffer = ""
+        while not self._stop_event.is_set():
+            if not train_log_path.exists():
+                time.sleep(self._poll_interval)
+                continue
+            with train_log_path.open("r", encoding="utf-8", errors="replace") as handle:
+                handle.seek(0, 0)
+                while not self._stop_event.is_set():
+                    chunk = handle.read()
+                    if not chunk:
+                        time.sleep(self._poll_interval)
+                        continue
+                    chunk = chunk.replace("\r", "\n")
+                    buffer += chunk
+                    lines = buffer.split("\n")
+                    buffer = lines.pop() if lines else ""
+                    for raw_line in lines:
+                        cleaned = _clean_log_line(raw_line)
+                        if not cleaned:
+                            continue
+                        payload = _parse_progress_line(cleaned)
+                        if not payload:
+                            continue
+                        epoch = payload.get("epoch")
+                        iteration = payload.get("iter")
+                        if epoch is None or iteration is None:
+                            continue
+                        key = (int(epoch), int(iteration))
+                        now = time.monotonic()
+                        if key == self._last_key:
+                            continue
+                        if now - self._last_emit < self._emit_interval:
+                            continue
+                        payload["type"] = "progress"
+                        payload["ts"] = utc_now_iso()
+                        with metrics_path.open("a", encoding="utf-8") as metrics_handle:
+                            metrics_handle.write(
+                                json.dumps(payload, ensure_ascii=False) + "\n"
+                            )
+                        self._last_key = key
+                        self._last_emit = now
+
+
 def _coerce_value(value: str) -> Any:
     try:
         if "." in value:
@@ -134,6 +215,34 @@ def _coerce_value(value: str) -> Any:
         return int(value)
     except (ValueError, TypeError):
         return value
+
+
+def _clean_log_line(line: str) -> str:
+    if not line:
+        return ""
+    cleaned = _ANSI_ESCAPE_RE.sub("", line)
+    cleaned = cleaned.replace("\r", "")
+    cleaned = cleaned.strip()
+    return cleaned
+
+
+def _parse_progress_line(line: str) -> Optional[Dict[str, Any]]:
+    match = _PROGRESS_LINE_RE.search(line)
+    if not match:
+        return None
+    payload: Dict[str, Any] = {}
+    for key, value in match.groupdict().items():
+        if value is None:
+            continue
+        if key == "gpu_mem":
+            payload[key] = value
+        else:
+            payload[key] = _coerce_value(value)
+    if "progress_pct" not in payload:
+        percent_match = re.search(r"(\d+)%", line)
+        if percent_match:
+            payload["progress_pct"] = _coerce_value(percent_match.group(1))
+    return payload
 
 
 def _find_latest_run_dir(project_dir: Path) -> Optional[Path]:
@@ -210,6 +319,8 @@ def run_yolo_train(
 
     metrics_watcher = MetricsWatcher(project_dir, logs_dir, resume_dir=resume_dir)
     metrics_watcher.start()
+    progress_watcher = ProgressWatcher(logs_dir)
+    progress_watcher.start()
     logger = logging.getLogger("model_forge.train")
     with train_log_path.open("a", encoding="utf-8") as log_handle:
         tee_stream = TeeStream(sys.stdout, log_handle)
@@ -232,6 +343,8 @@ def run_yolo_train(
         finally:
             metrics_watcher.stop()
             metrics_watcher.join(timeout=5)
+            progress_watcher.stop()
+            progress_watcher.join(timeout=5)
             logger.removeHandler(handler)
 
     run_dir = resume_dir or _find_latest_run_dir(project_dir)
