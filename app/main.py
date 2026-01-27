@@ -34,7 +34,7 @@ def _resolve_device(device_policy: str) -> str:
 
 def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
     created_at = utc_now_iso()
-    job_store.update_result(job_id, status="running")
+    job_store.update_job(job_id, status="running")
     outputs_dir = Path("outputs") / job_id
     task = None
     try:
@@ -76,12 +76,13 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             missing_artifacts=result.get("missing_artifacts", []),
             created_at=created_at,
             finished_at=finished_at,
+            error=None,
             clearml_offline_note="ClearML offline artifacts are stored under ~/.clearml/cache/offline",
         )
         result["meta_path"] = str(meta_path.resolve())
         result["created_at"] = created_at
         result["finished_at"] = finished_at
-        job_store.update_result(job_id, status="completed", result=result)
+        job_store.update_job(job_id, status="completed", result=result)
     except Exception as exc:
         finished_at = utc_now_iso()
         meta_path = write_meta(
@@ -94,9 +95,10 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             missing_artifacts=["best.pt", "last.pt", "results.csv", "args.yaml"],
             created_at=created_at,
             finished_at=finished_at,
+            error=str(exc),
             clearml_offline_note="ClearML offline artifacts are stored under ~/.clearml/cache/offline",
         )
-        job_store.update_result(
+        job_store.update_job(
             job_id,
             status="failed",
             error=str(exc),
@@ -118,7 +120,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
 @app.post("/train/yolo", response_model=TrainResponse)
 def train_yolo(request: YoloTrainRequest) -> TrainResponse:
     job_id = uuid4().hex
-    job_store.set_status(job_id, "queued")
+    job_store.create_job(job_id)
     thread = Thread(target=_run_yolo_job, args=(job_id, request), daemon=True)
     thread.start()
     return TrainResponse(job_id=job_id, status="queued")
@@ -126,7 +128,7 @@ def train_yolo(request: YoloTrainRequest) -> TrainResponse:
 
 @app.get("/train/{job_id}", response_model=TrainStatusResponse)
 def get_train_status(job_id: str) -> TrainStatusResponse:
-    record = job_store.get_status(job_id)
+    record = job_store.get_job(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="job_id not found")
     return TrainStatusResponse(
