@@ -27,6 +27,7 @@ def write_meta(
     train_mode: Optional[str] = None,
     dataset: Optional[Dict[str, Any]] = None,
     model: Optional[Dict[str, Any]] = None,
+    hyperparams: Optional[Dict[str, Any]] = None,
 ) -> Path:
     outputs_dir.mkdir(parents=True, exist_ok=True)
     meta_path = outputs_dir / "meta.json"
@@ -50,6 +51,8 @@ def write_meta(
         payload["dataset"] = dataset
     if model:
         payload["model"] = model
+    if hyperparams is not None:
+        payload["hyperparams"] = hyperparams
 
     meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     return meta_path

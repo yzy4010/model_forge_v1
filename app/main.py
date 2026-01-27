@@ -9,6 +9,7 @@ from uuid import uuid4
 from clearml import Task
 from fastapi import FastAPI, HTTPException
 import csv
+import json
 
 from app.schemas.train import TrainResponse, TrainStatusResponse, YoloTrainRequest
 from app.services.job_store import job_store
@@ -43,21 +44,6 @@ def _coerce_value(value: str) -> Any:
         return value
 
 
-def _filter_rows(rows: Iterable[list[str]]) -> list[list[str]]:
-    return [row for row in rows if any(cell.strip() for cell in row)]
-
-
-def _resolve_results_csv(job_dir: Path) -> tuple[Optional[Path], Optional[str]]:
-    artifacts_path = job_dir / "artifacts" / "results.csv"
-    if artifacts_path.exists():
-        return artifacts_path, "artifacts/results.csv"
-    raw_results = list((job_dir / "raw").glob("train*/results.csv"))
-    if not raw_results:
-        return None, None
-    latest = max(raw_results, key=lambda path: path.stat().st_mtime)
-    return latest, "raw/train/results.csv"
-
-
 def _get_value(payload: dict[str, str], options: Iterable[str]) -> Optional[Any]:
     for key in options:
         if key in payload and payload[key] != "":
@@ -65,44 +51,41 @@ def _get_value(payload: dict[str, str], options: Iterable[str]) -> Optional[Any]
     return None
 
 
-def _build_event(payload: dict[str, str]) -> Optional[dict[str, Any]]:
-    epoch_value = _get_value(payload, ["epoch"])
-    if epoch_value is None:
-        return None
-    metrics: dict[str, Any] = {}
-    losses: dict[str, Any] = {}
-    map50 = _get_value(payload, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
-    if map50 is not None:
-        metrics["map50"] = map50
-    map5095 = _get_value(
-        payload,
-        ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95", "map50_95"],
-    )
-    if map5095 is not None:
-        metrics["map5095"] = map5095
-    precision = _get_value(payload, ["metrics/precision(B)", "precision"])
-    if precision is not None:
-        metrics["precision"] = precision
-    recall = _get_value(payload, ["metrics/recall(B)", "recall"])
-    if recall is not None:
-        metrics["recall"] = recall
-
-    box_loss = _get_value(payload, ["train/box_loss", "box_loss", "val/box_loss"])
-    if box_loss is not None:
-        losses["box_loss"] = box_loss
-    cls_loss = _get_value(payload, ["train/cls_loss", "cls_loss", "val/cls_loss"])
-    if cls_loss is not None:
-        losses["cls_loss"] = cls_loss
-    dfl_loss = _get_value(payload, ["train/dfl_loss", "dfl_loss", "val/dfl_loss"])
-    if dfl_loss is not None:
-        losses["dfl_loss"] = dfl_loss
-
-    event: dict[str, Any] = {"epoch": epoch_value, "ts": utc_now_iso()}
-    if metrics:
-        event["metrics"] = metrics
-    if losses:
-        event["losses"] = losses
-    return event
+def _parse_results_csv(results_path: Path) -> list[dict[str, Any]]:
+    try:
+        lines = results_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return []
+    rows = [row for row in csv.reader(lines) if any(row)]
+    if len(rows) < 2:
+        return []
+    headers = rows[0]
+    if headers:
+        headers[0] = headers[0].lstrip("\ufeff")
+    data_rows = rows[1:]
+    results: list[dict[str, Any]] = []
+    for row in data_rows:
+        if len(row) < len(headers):
+            continue
+        payload = dict(zip(headers, row))
+        epoch_value = _get_value(payload, ["epoch"])
+        if epoch_value is None:
+            continue
+        entry = {
+            "epoch": epoch_value,
+            "box_loss": _get_value(payload, ["train/box_loss", "box_loss", "val/box_loss"]),
+            "cls_loss": _get_value(payload, ["train/cls_loss", "cls_loss", "val/cls_loss"]),
+            "dfl_loss": _get_value(payload, ["train/dfl_loss", "dfl_loss", "val/dfl_loss"]),
+            "precision": _get_value(payload, ["metrics/precision(B)", "precision"]),
+            "recall": _get_value(payload, ["metrics/recall(B)", "recall"]),
+            "map50": _get_value(payload, ["metrics/mAP50(B)", "metrics/mAP50", "map50"]),
+            "map50_95": _get_value(
+                payload,
+                ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95", "map50_95"],
+            ),
+        }
+        results.append(entry)
+    return results
 
 
 def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
@@ -131,6 +114,8 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             "weight": request.base_weight,
         },
     }
+    hyperparams: Dict[str, Any] = dict(request.hyperparams)
+    hyperparams.setdefault("workers", 0)
     try:
         Task.set_offline(True)
         task_name = f"yolo-train-{job_id}"
@@ -152,8 +137,6 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
         )
         task.connect(request.hyperparams, name="hyperparams")
 
-        hyperparams: Dict[str, Any] = dict(request.hyperparams)
-        hyperparams.setdefault("workers", 0)
         device = _resolve_device(request.device_policy)
 
         result = run_yolo_train(
@@ -183,6 +166,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             train_mode=request.train_mode,
             dataset=dataset_meta,
             model=model_meta,
+            hyperparams=hyperparams,
         )
         result["meta_path"] = str(meta_path.resolve())
         result["created_at"] = created_at
@@ -206,6 +190,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             train_mode=request.train_mode,
             dataset=dataset_meta,
             model=model_meta,
+            hyperparams=hyperparams,
         )
         job_store.update_job(
             job_id,
@@ -249,71 +234,83 @@ def get_train_status(job_id: str) -> TrainStatusResponse:
 
 
 @app.get("/train/{job_id}/logs")
-def get_train_logs(job_id: str, offset: int = 0, limit: int = 20000) -> dict:
-    job_dir = Path("outputs") / job_id
-    log_path = job_dir / "logs" / "train.log"
-    if not job_dir.exists():
-        raise HTTPException(status_code=404, detail="job_id not found")
-    if offset < 0 or limit <= 0:
-        raise HTTPException(status_code=400, detail="Invalid offset/limit")
-    if not log_path.exists():
-        return {"offset": offset, "next_offset": offset, "text": ""}
-    with log_path.open("rb") as handle:
-        handle.seek(offset)
-        data = handle.read(limit)
-    text = data.decode("utf-8", errors="replace")
-    next_offset = offset + len(data)
-    return {"offset": offset, "next_offset": next_offset, "text": text}
-
-
-@app.get("/train/{job_id}/stream")
-def get_train_stream(job_id: str, cursor: int = 0) -> dict:
+def get_train_logs(job_id: str) -> dict:
     record = job_store.get_job(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="job_id not found")
-    if cursor < 0:
-        raise HTTPException(status_code=400, detail="Invalid cursor")
-    job_dir = Path("outputs") / job_id
-    results_path, source = _resolve_results_csv(job_dir)
-    if results_path is None:
-        return {
-            "cursor": cursor,
-            "events": [],
-            "status": record.status,
-            "source": None,
-            "waiting_for": "results.csv not created yet (emitted at epoch end)",
-        }
-    try:
-        rows = _filter_rows(
-            list(csv.reader(results_path.read_text(encoding="utf-8").splitlines()))
+    if record.status != "completed":
+        raise HTTPException(
+            status_code=409, detail="training logs available after completion"
         )
-    except OSError:
-        rows = []
-    if len(rows) < 2:
-        return {
-            "cursor": 0,
-            "events": [],
-            "status": record.status,
-            "source": source,
-            "waiting_for": None,
-        }
-    headers = rows[0]
-    if headers:
-        headers[0] = headers[0].lstrip("\ufeff")
-    data_rows = rows[1:]
-    start_index = min(cursor, len(data_rows))
-    events = []
-    for row in data_rows[start_index:]:
-        if len(row) < len(headers):
-            continue
-        payload = dict(zip(headers, row))
-        event = _build_event(payload)
-        if event:
-            events.append(event)
+    job_dir = Path("outputs") / job_id
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="meta.json not found")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="meta.json invalid")
+    results_path = job_dir / "artifacts" / "results.csv"
+    results = _parse_results_csv(results_path) if results_path.exists() else []
+    best_entry = max(
+        (entry for entry in results if entry.get("map50") is not None),
+        key=lambda entry: entry["map50"],
+        default=None,
+    )
+    metrics_summary = {
+        "best_epoch": best_entry["epoch"] if best_entry else None,
+        "best_map50": best_entry["map50"] if best_entry else None,
+        "best_map50_95": best_entry["map50_95"] if best_entry else None,
+    }
+    dataset = meta.get("dataset") or {}
+    model = meta.get("model") or {}
     return {
-        "cursor": len(data_rows),
-        "events": events,
-        "status": record.status,
-        "source": source,
-        "waiting_for": None,
+        "job_id": job_id,
+        "train_mode": meta.get("train_mode"),
+        "dataset_id": dataset.get("dataset_id"),
+        "model_name_or_path": model.get("name_or_path"),
+        "hyperparams": meta.get("hyperparams") or {},
+        "artifacts": meta.get("artifacts") or [],
+        "metrics_summary": metrics_summary,
+        "created_at": meta.get("created_at"),
+        "finished_at": meta.get("finished_at"),
+    }
+
+
+@app.get("/train/{job_id}/stream")
+def get_train_stream(job_id: str) -> dict:
+    record = job_store.get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job_id not found")
+    job_dir = Path("outputs") / job_id
+    results_path = job_dir / "artifacts" / "results.csv"
+    status = "completed" if record.status == "completed" else "running"
+    if not results_path.exists():
+        return {
+            "job_id": job_id,
+            "status": "running",
+            "epochs": 0,
+            "results": [],
+            "best": None,
+            "message": "results not ready (emitted after epoch end)",
+        }
+    results = _parse_results_csv(results_path)
+    best_entry = max(
+        (entry for entry in results if entry.get("map50") is not None),
+        key=lambda entry: entry["map50"],
+        default=None,
+    )
+    best = None
+    if best_entry:
+        best = {
+            "epoch": best_entry["epoch"],
+            "map50": best_entry["map50"],
+            "map50_95": best_entry["map50_95"],
+        }
+    return {
+        "job_id": job_id,
+        "status": status,
+        "epochs": len(results),
+        "results": results,
+        "best": best,
     }
