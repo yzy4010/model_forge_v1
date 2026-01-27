@@ -4,6 +4,7 @@ from hashlib import sha1
 from pathlib import Path
 from threading import Thread
 from typing import Any, Dict, Iterable, Optional
+import re
 from uuid import uuid4
 
 from clearml import Task
@@ -86,6 +87,110 @@ def _parse_results_csv(results_path: Path) -> list[dict[str, Any]]:
         }
         results.append(entry)
     return results
+
+
+def _find_latest_run_dir(raw_dir: Path) -> Optional[Path]:
+    run_dirs = [
+        path
+        for path in raw_dir.glob("train*")
+        if path.is_dir() and path.name.startswith("train")
+    ]
+    if not run_dirs:
+        return None
+    return max(run_dirs, key=lambda path: path.stat().st_mtime)
+
+
+def _find_results_csv(job_dir: Path) -> Optional[Path]:
+    artifacts_results = job_dir / "artifacts" / "results.csv"
+    if artifacts_results.exists():
+        return artifacts_results
+    raw_dir = job_dir / "raw"
+    run_dir = _find_latest_run_dir(raw_dir) if raw_dir.exists() else None
+    if run_dir:
+        candidate = run_dir / "results.csv"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_args_yaml(job_dir: Path) -> Optional[Path]:
+    artifacts_args = job_dir / "artifacts" / "args.yaml"
+    if artifacts_args.exists():
+        return artifacts_args
+    raw_dir = job_dir / "raw"
+    run_dir = _find_latest_run_dir(raw_dir) if raw_dir.exists() else None
+    if run_dir:
+        candidate = run_dir / "args.yaml"
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _parse_epochs_from_args(args_path: Path) -> Optional[int]:
+    try:
+        lines = args_path.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return None
+    pattern = re.compile(r"^\s*epochs\s*:\s*(.+?)\s*$")
+    for line in lines:
+        match = pattern.match(line)
+        if not match:
+            continue
+        value = match.group(1).strip().strip("'\"")
+        try:
+            return int(float(value))
+        except ValueError:
+            return None
+    return None
+
+
+def _resolve_epochs_total(job_dir: Path) -> Optional[int]:
+    meta_path = job_dir / "meta.json"
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            meta = {}
+        hyperparams = meta.get("hyperparams") or {}
+        epochs_value = hyperparams.get("epochs")
+        if epochs_value is not None:
+            try:
+                return int(float(epochs_value))
+            except (TypeError, ValueError):
+                return None
+    args_path = _find_args_yaml(job_dir)
+    if args_path:
+        return _parse_epochs_from_args(args_path)
+    return None
+
+
+def _build_logs_summary(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
+    job_dir = Path("outputs") / job_id
+    results_path = _find_results_csv(job_dir)
+    results = _parse_results_csv(results_path) if results_path else []
+    best_entry = max(
+        (entry for entry in results if entry.get("map50") is not None),
+        key=lambda entry: entry["map50"],
+        default=None,
+    )
+    metrics_summary = {
+        "best_epoch": best_entry["epoch"] if best_entry else None,
+        "best_map50": best_entry["map50"] if best_entry else None,
+        "best_map50_95": best_entry["map50_95"] if best_entry else None,
+    }
+    dataset = meta.get("dataset") or {}
+    model = meta.get("model") or {}
+    return {
+        "job_id": job_id,
+        "train_mode": meta.get("train_mode"),
+        "dataset_id": dataset.get("dataset_id"),
+        "model_name_or_path": model.get("name_or_path"),
+        "hyperparams": meta.get("hyperparams") or {},
+        "artifacts": meta.get("artifacts") or [],
+        "metrics_summary": metrics_summary,
+        "created_at": meta.get("created_at"),
+        "finished_at": meta.get("finished_at"),
+    }
 
 
 def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
@@ -250,67 +355,77 @@ def get_train_logs(job_id: str) -> dict:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         raise HTTPException(status_code=500, detail="meta.json invalid")
-    results_path = job_dir / "artifacts" / "results.csv"
-    results = _parse_results_csv(results_path) if results_path.exists() else []
+    return _build_logs_summary(job_id, meta)
+
+
+@app.get("/train/{job_id}/progress")
+def get_train_progress(job_id: str, history_tail_size: int = 5) -> dict:
+    record = job_store.get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job_id not found")
+    job_dir = Path("outputs") / job_id
+    results_path = _find_results_csv(job_dir)
+    results = _parse_results_csv(results_path) if results_path else []
+    epochs_total = _resolve_epochs_total(job_dir)
+    if not results:
+        return {
+            "job_id": job_id,
+            "status": record.status,
+            "epochs_total": epochs_total,
+            "epochs_done": 0,
+            "last": None,
+            "best_so_far": None,
+            "history_tail": [],
+        }
     best_entry = max(
         (entry for entry in results if entry.get("map50") is not None),
         key=lambda entry: entry["map50"],
         default=None,
     )
-    metrics_summary = {
-        "best_epoch": best_entry["epoch"] if best_entry else None,
-        "best_map50": best_entry["map50"] if best_entry else None,
-        "best_map50_95": best_entry["map50_95"] if best_entry else None,
-    }
-    dataset = meta.get("dataset") or {}
-    model = meta.get("model") or {}
     return {
         "job_id": job_id,
-        "train_mode": meta.get("train_mode"),
-        "dataset_id": dataset.get("dataset_id"),
-        "model_name_or_path": model.get("name_or_path"),
-        "hyperparams": meta.get("hyperparams") or {},
+        "status": record.status,
+        "epochs_total": epochs_total,
+        "epochs_done": len(results),
+        "last": results[-1],
+        "best_so_far": best_entry,
+        "history_tail": results[-max(history_tail_size, 0) :] if history_tail_size else [],
+    }
+
+
+@app.get("/train/{job_id}/result")
+def get_train_result(job_id: str) -> dict:
+    record = job_store.get_job(job_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="job_id not found")
+    if record.status != "completed":
+        raise HTTPException(status_code=409, detail="training not finished")
+    job_dir = Path("outputs") / job_id
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="meta.json not found")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=500, detail="meta.json invalid")
+    results_path = _find_results_csv(job_dir)
+    results = _parse_results_csv(results_path) if results_path else []
+    best_entry = max(
+        (entry for entry in results if entry.get("map50") is not None),
+        key=lambda entry: entry["map50"],
+        default=None,
+    )
+    return {
+        "job_id": job_id,
+        "status": record.status,
+        "epochs_total": _resolve_epochs_total(job_dir),
+        "results": results,
+        "best": best_entry,
         "artifacts": meta.get("artifacts") or [],
-        "metrics_summary": metrics_summary,
-        "created_at": meta.get("created_at"),
-        "finished_at": meta.get("finished_at"),
+        "logs_summary": _build_logs_summary(job_id, meta),
     }
 
 
 @app.get("/train/{job_id}/stream")
 def get_train_stream(job_id: str) -> dict:
-    record = job_store.get_job(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="job_id not found")
-    job_dir = Path("outputs") / job_id
-    results_path = job_dir / "artifacts" / "results.csv"
-    status = "completed" if record.status == "completed" else "running"
-    if not results_path.exists():
-        return {
-            "job_id": job_id,
-            "status": "running",
-            "epochs": 0,
-            "results": [],
-            "best": None,
-            "message": "results not ready (emitted after epoch end)",
-        }
-    results = _parse_results_csv(results_path)
-    best_entry = max(
-        (entry for entry in results if entry.get("map50") is not None),
-        key=lambda entry: entry["map50"],
-        default=None,
-    )
-    best = None
-    if best_entry:
-        best = {
-            "epoch": best_entry["epoch"],
-            "map50": best_entry["map50"],
-            "map50_95": best_entry["map50_95"],
-        }
-    return {
-        "job_id": job_id,
-        "status": status,
-        "epochs": len(results),
-        "results": results,
-        "best": best,
-    }
+    return get_train_result(job_id)
