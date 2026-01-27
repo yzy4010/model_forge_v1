@@ -212,31 +212,5 @@ def get_train_stream(job_id: str, cursor: int = 0) -> dict:
             payload = json.loads(line)
         except json.JSONDecodeError:
             continue
-        events.append(_filter_metrics_payload(payload))
+        events.append(payload)
     return {"cursor": len(lines), "events": events, "status": record.status}
-
-
-def _filter_metrics_payload(payload: dict) -> dict:
-    allowed = {
-        "epoch",
-        "epochs",
-        "metrics/precision(B)",
-        "metrics/recall(B)",
-        "metrics/mAP50(B)",
-        "metrics/mAP50-95(B)",
-        "metrics/mAP50-95",
-        "metrics/mAP50",
-        "precision",
-        "recall",
-        "map50",
-        "map50-95",
-        "map50_95",
-        "loss",
-        "train/box_loss",
-        "train/cls_loss",
-        "train/dfl_loss",
-        "val/box_loss",
-        "val/cls_loss",
-        "val/dfl_loss",
-    }
-    return {key: value for key, value in payload.items() if key in allowed}
