@@ -3,12 +3,12 @@ from __future__ import annotations
 from hashlib import sha1
 from pathlib import Path
 from threading import Thread
-from typing import Any, Dict
+from typing import Any, Dict, Iterable, Optional
 from uuid import uuid4
 
 from clearml import Task
 from fastapi import FastAPI, HTTPException
-import json
+import csv
 
 from app.schemas.train import TrainResponse, TrainStatusResponse, YoloTrainRequest
 from app.services.job_store import job_store
@@ -32,6 +32,77 @@ def _resolve_device(device_policy: str) -> str:
     if device_policy.lower() in {"auto", "cpu"}:
         return "cpu"
     return device_policy
+
+
+def _coerce_value(value: str) -> Any:
+    try:
+        if "." in value:
+            return float(value)
+        return int(value)
+    except (ValueError, TypeError):
+        return value
+
+
+def _filter_rows(rows: Iterable[list[str]]) -> list[list[str]]:
+    return [row for row in rows if any(cell.strip() for cell in row)]
+
+
+def _resolve_results_csv(job_dir: Path) -> tuple[Optional[Path], Optional[str]]:
+    artifacts_path = job_dir / "artifacts" / "results.csv"
+    if artifacts_path.exists():
+        return artifacts_path, "artifacts/results.csv"
+    raw_results = list((job_dir / "raw").glob("train*/results.csv"))
+    if not raw_results:
+        return None, None
+    latest = max(raw_results, key=lambda path: path.stat().st_mtime)
+    return latest, "raw/train/results.csv"
+
+
+def _get_value(payload: dict[str, str], options: Iterable[str]) -> Optional[Any]:
+    for key in options:
+        if key in payload and payload[key] != "":
+            return _coerce_value(payload[key])
+    return None
+
+
+def _build_event(payload: dict[str, str]) -> Optional[dict[str, Any]]:
+    epoch_value = _get_value(payload, ["epoch"])
+    if epoch_value is None:
+        return None
+    metrics: dict[str, Any] = {}
+    losses: dict[str, Any] = {}
+    map50 = _get_value(payload, ["metrics/mAP50(B)", "metrics/mAP50", "map50"])
+    if map50 is not None:
+        metrics["map50"] = map50
+    map5095 = _get_value(
+        payload,
+        ["metrics/mAP50-95(B)", "metrics/mAP50-95", "map50-95", "map50_95"],
+    )
+    if map5095 is not None:
+        metrics["map5095"] = map5095
+    precision = _get_value(payload, ["metrics/precision(B)", "precision"])
+    if precision is not None:
+        metrics["precision"] = precision
+    recall = _get_value(payload, ["metrics/recall(B)", "recall"])
+    if recall is not None:
+        metrics["recall"] = recall
+
+    box_loss = _get_value(payload, ["train/box_loss", "box_loss", "val/box_loss"])
+    if box_loss is not None:
+        losses["box_loss"] = box_loss
+    cls_loss = _get_value(payload, ["train/cls_loss", "cls_loss", "val/cls_loss"])
+    if cls_loss is not None:
+        losses["cls_loss"] = cls_loss
+    dfl_loss = _get_value(payload, ["train/dfl_loss", "dfl_loss", "val/dfl_loss"])
+    if dfl_loss is not None:
+        losses["dfl_loss"] = dfl_loss
+
+    event: dict[str, Any] = {"epoch": epoch_value, "ts": utc_now_iso()}
+    if metrics:
+        event["metrics"] = metrics
+    if losses:
+        event["losses"] = losses
+    return event
 
 
 def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
@@ -200,17 +271,49 @@ def get_train_stream(job_id: str, cursor: int = 0) -> dict:
     record = job_store.get_job(job_id)
     if record is None:
         raise HTTPException(status_code=404, detail="job_id not found")
-    metrics_path = Path("outputs") / job_id / "logs" / "metrics.jsonl"
     if cursor < 0:
         raise HTTPException(status_code=400, detail="Invalid cursor")
-    if not metrics_path.exists():
-        return {"cursor": cursor, "events": [], "status": record.status}
-    lines = metrics_path.read_text(encoding="utf-8").splitlines()
+    job_dir = Path("outputs") / job_id
+    results_path, source = _resolve_results_csv(job_dir)
+    if results_path is None:
+        return {
+            "cursor": cursor,
+            "events": [],
+            "status": record.status,
+            "source": None,
+            "waiting_for": "results.csv not created yet (emitted at epoch end)",
+        }
+    try:
+        rows = _filter_rows(
+            list(csv.reader(results_path.read_text(encoding="utf-8").splitlines()))
+        )
+    except OSError:
+        rows = []
+    if len(rows) < 2:
+        return {
+            "cursor": 0,
+            "events": [],
+            "status": record.status,
+            "source": source,
+            "waiting_for": None,
+        }
+    headers = rows[0]
+    if headers:
+        headers[0] = headers[0].lstrip("\ufeff")
+    data_rows = rows[1:]
+    start_index = min(cursor, len(data_rows))
     events = []
-    for line in lines[cursor:]:
-        try:
-            payload = json.loads(line)
-        except json.JSONDecodeError:
+    for row in data_rows[start_index:]:
+        if len(row) < len(headers):
             continue
-        events.append(payload)
-    return {"cursor": len(lines), "events": events, "status": record.status}
+        payload = dict(zip(headers, row))
+        event = _build_event(payload)
+        if event:
+            events.append(event)
+    return {
+        "cursor": len(data_rows),
+        "events": events,
+        "status": record.status,
+        "source": source,
+        "waiting_for": None,
+    }
