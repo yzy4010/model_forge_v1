@@ -11,6 +11,7 @@ from clearml import Task
 from fastapi import FastAPI, HTTPException
 import csv
 import json
+import zipfile
 
 from app.schemas.train import TrainResponse, TrainStatusResponse, YoloTrainRequest
 from app.services.job_store import job_store
@@ -191,6 +192,47 @@ def _build_logs_summary(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
         "created_at": meta.get("created_at"),
         "finished_at": meta.get("finished_at"),
     }
+
+
+def _build_result_bundle(job_id: str, meta: dict[str, Any]) -> Path:
+    job_dir = Path("outputs") / job_id
+    bundle_dir = job_dir / "bundle"
+    zip_path = bundle_dir / f"model_forge_{job_id}.zip"
+    if zip_path.exists():
+        return zip_path.resolve()
+    bundle_dir.mkdir(parents=True, exist_ok=True)
+
+    artifacts_dir = job_dir / "artifacts"
+    artifact_candidates = {
+        "best.pt": artifacts_dir / "best.pt",
+        "last.pt": artifacts_dir / "last.pt",
+        "results.csv": artifacts_dir / "results.csv",
+        "args.yaml": artifacts_dir / "args.yaml",
+    }
+
+    dataset = meta.get("dataset") or {}
+    readme_lines = [
+        f"job_id: {job_id}",
+        f"train_mode: {meta.get('train_mode')}",
+        f"dataset_id: {dataset.get('dataset_id')}",
+        f"created_at: {meta.get('created_at')}",
+        f"finished_at: {meta.get('finished_at')}",
+        "",
+    ]
+    readme_content = "\n".join(readme_lines)
+
+    meta_path = job_dir / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="meta.json not found")
+
+    with zipfile.ZipFile(zip_path, "w", compression=zipfile.ZIP_DEFLATED) as bundle:
+        bundle.write(meta_path, arcname="meta.json")
+        bundle.writestr("README.txt", readme_content)
+        for filename, source_path in artifact_candidates.items():
+            if not source_path.exists():
+                continue
+            bundle.write(source_path, arcname=f"artifacts/{filename}")
+    return zip_path.resolve()
 
 
 def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
@@ -415,6 +457,7 @@ def get_train_result(job_id: str) -> dict:
         key=lambda entry: entry["map50"],
         default=None,
     )
+    bundle_path = _build_result_bundle(job_id, meta)
     return {
         "job_id": job_id,
         "status": record.status,
@@ -423,6 +466,7 @@ def get_train_result(job_id: str) -> dict:
         "best": best_entry,
         "artifacts": meta.get("artifacts") or [],
         "logs_summary": _build_logs_summary(job_id, meta),
+        "bundle": {"zip_path": str(bundle_path)},
     }
 
 
