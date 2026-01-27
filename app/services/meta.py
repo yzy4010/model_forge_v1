@@ -24,6 +24,9 @@ def write_meta(
     finished_at: str,
     error: Optional[str] = None,
     clearml_offline_note: Optional[str] = None,
+    train_mode: Optional[str] = None,
+    dataset: Optional[Dict[str, Any]] = None,
+    model: Optional[Dict[str, Any]] = None,
 ) -> Path:
     outputs_dir.mkdir(parents=True, exist_ok=True)
     meta_path = outputs_dir / "meta.json"
@@ -41,6 +44,12 @@ def write_meta(
     }
     if clearml_offline_note:
         payload["clearml_offline_note"] = clearml_offline_note
+    if train_mode:
+        payload["train_mode"] = train_mode
+    if dataset:
+        payload["dataset"] = dataset
+    if model:
+        payload["model"] = model
 
     meta_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2))
     return meta_path
