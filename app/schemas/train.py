@@ -30,13 +30,6 @@ class TrainResponse(BaseModel):
     status: str
 
 
-class TrainStatusResponse(BaseModel):
-    job_id: str
-    status: str
-    error: Optional[str] = None
-    result: Optional[Dict[str, Any]] = None
-
-
 class YoloTrainNewParams(BaseModel):
     epochs: int = Field(50, description="Number of training epochs")
     imgsz: int = Field(640, description="Training image size")
