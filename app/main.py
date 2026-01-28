@@ -16,7 +16,7 @@ import shutil
 import zipfile
 import yaml
 
-from app.schemas.datasets import DatasetUploadResponse
+from app.schemas.datasets import DatasetInfoResponse, DatasetUploadResponse
 from app.schemas.train import TrainResponse, TrainStatusResponse, YoloTrainRequest
 from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
@@ -184,6 +184,7 @@ def upload_dataset(
     name: Optional[str] = Form(None),
 ) -> DatasetUploadResponse:
     dataset_id = uuid4().hex
+    created_at = utc_now_iso()
     datasets_root = Path("datasets")
     dataset_dir = datasets_root / dataset_id
     extracted_dir = dataset_dir / "extracted"
@@ -280,6 +281,7 @@ def upload_dataset(
         "stats": stats,
         "raw_data_yaml": raw_data,
         "raw_data_yaml_text": raw_data_text,
+        "created_at": created_at,
     }
 
     meta_path = dataset_dir / "dataset_meta.json"
@@ -291,6 +293,26 @@ def upload_dataset(
         extracted_dir=str(extracted_dir.resolve()),
         resolved_data_yaml_path=str(resolved_yaml_path.resolve()),
         stats=stats,
+    )
+
+
+@app.get("/datasets/{dataset_id}", response_model=DatasetInfoResponse)
+def get_dataset_info(dataset_id: str) -> DatasetInfoResponse:
+    dataset_dir = Path("datasets") / dataset_id
+    meta_path = dataset_dir / "dataset_meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="dataset_id not found")
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="dataset_meta.json is invalid") from exc
+    return DatasetInfoResponse(
+        dataset_id=meta.get("dataset_id", dataset_id),
+        dataset_dir=meta.get("dataset_dir", str(dataset_dir.resolve())),
+        extracted_dir=meta.get("extracted_dir"),
+        resolved_data_yaml_path=meta.get("resolved_data_yaml_path"),
+        stats=meta.get("stats", {}),
+        created_at=meta.get("created_at"),
     )
 
 
