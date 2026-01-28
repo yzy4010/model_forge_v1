@@ -17,7 +17,12 @@ import zipfile
 import yaml
 
 from app.schemas.datasets import DatasetInfoResponse, DatasetUploadResponse
-from app.schemas.train import TrainResponse, TrainStatusResponse, YoloTrainRequest
+from app.schemas.train import (
+    TrainResponse,
+    TrainStatusResponse,
+    YoloTrainNewRequest,
+    YoloTrainRequest,
+)
 from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
 from app.trainers.yolo_ultralytics import run_yolo_train
@@ -25,6 +30,11 @@ from app.trainers.yolo_ultralytics import run_yolo_train
 app = FastAPI(title="ModelForge v1")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
+MODEL_SPEC_WEIGHTS = {
+    "yolov8s": "yolov8s.pt",
+    "yolov8n": "yolov8n.pt",
+    "yolov26": "yolov26.pt",
+}
 
 
 @app.get("/")
@@ -57,6 +67,19 @@ def _get_value(payload: dict[str, str], options: Iterable[str]) -> Optional[Any]
         if key in payload and payload[key] != "":
             return _coerce_value(payload[key])
     return None
+
+
+def _resolve_model_spec(model_spec: str) -> str:
+    normalized = model_spec.strip().lower()
+    if normalized not in MODEL_SPEC_WEIGHTS:
+        raise HTTPException(status_code=400, detail="unsupported model_spec")
+    weight = MODEL_SPEC_WEIGHTS[normalized]
+    if normalized == "yolov26" and not Path(weight).exists():
+        raise HTTPException(
+            status_code=400,
+            detail="yolov26.pt not found; please provide weights",
+        )
+    return weight
 
 
 def _parse_results_csv(results_path: Path) -> list[dict[str, Any]]:
@@ -118,6 +141,20 @@ def _find_results_csv(job_dir: Path) -> Optional[Path]:
         if candidate.exists():
             return candidate
     return None
+
+
+def _load_resolved_data_yaml(dataset_id: str) -> Path:
+    dataset_dir = Path("datasets") / dataset_id
+    resolved_path = dataset_dir / "resolved_data.yaml"
+    if not resolved_path.exists():
+        raise HTTPException(status_code=404, detail="dataset_id not found")
+    try:
+        payload = yaml.safe_load(resolved_path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=500, detail="resolved_data.yaml invalid") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=400, detail="resolved_data.yaml must contain a mapping")
+    return resolved_path
 
 
 def _safe_extract_zip(zip_path: Path, extracted_dir: Path) -> None:
@@ -437,7 +474,12 @@ def _build_result_bundle(job_id: str, meta: dict[str, Any]) -> Path:
     return zip_path.resolve()
 
 
-def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
+def _run_yolo_job(
+    job_id: str,
+    request: YoloTrainRequest,
+    meta_hyperparams: Optional[Dict[str, Any]] = None,
+    train_hyperparams: Optional[Dict[str, Any]] = None,
+) -> None:
     created_at = utc_now_iso()
     job_store.update_job(job_id, status="running")
     outputs_dir = Path("outputs") / job_id
@@ -463,8 +505,14 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             "weight": request.base_weight,
         },
     }
-    hyperparams: Dict[str, Any] = dict(request.hyperparams)
+    hyperparams: Dict[str, Any] = dict(train_hyperparams or request.hyperparams)
     hyperparams.setdefault("workers", 0)
+    meta_hparams: Dict[str, Any]
+    if meta_hyperparams is None:
+        meta_hparams = dict(hyperparams)
+    else:
+        meta_hparams = dict(meta_hyperparams)
+        meta_hparams.setdefault("workers", hyperparams.get("workers", 0))
     try:
         Task.set_offline(True)
         task_name = f"yolo-train-{job_id}"
@@ -484,7 +532,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             },
             name="train_config",
         )
-        task.connect(request.hyperparams, name="hyperparams")
+        task.connect(meta_hparams, name="hyperparams")
 
         device = _resolve_device(request.device_policy)
 
@@ -515,7 +563,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             train_mode=request.train_mode,
             dataset=dataset_meta,
             model=model_meta,
-            hyperparams=hyperparams,
+            hyperparams=meta_hparams,
         )
         result["meta_path"] = str(meta_path.resolve())
         result["created_at"] = created_at
@@ -539,7 +587,7 @@ def _run_yolo_job(job_id: str, request: YoloTrainRequest) -> None:
             train_mode=request.train_mode,
             dataset=dataset_meta,
             model=model_meta,
-            hyperparams=hyperparams,
+            hyperparams=meta_hparams,
         )
         job_store.update_job(
             job_id,
@@ -565,6 +613,38 @@ def train_yolo(request: YoloTrainRequest) -> TrainResponse:
     job_id = uuid4().hex
     job_store.create_job(job_id)
     thread = Thread(target=_run_yolo_job, args=(job_id, request), daemon=True)
+    thread.start()
+    return TrainResponse(job_id=job_id, status="queued")
+
+
+@app.post("/train/yolo/new", response_model=TrainResponse)
+def train_yolo_new(request: YoloTrainNewRequest) -> TrainResponse:
+    resolved_data_path = _load_resolved_data_yaml(request.dataset_id)
+    model_name_or_path = _resolve_model_spec(request.model_spec)
+    params_payload = request.params.dict()
+    device_policy = params_payload.pop("device_policy", "auto")
+    meta_hyperparams = {key: value for key, value in params_payload.items() if value is not None}
+    train_hyperparams = dict(meta_hyperparams)
+    train_hyperparams.pop("augment_level", None)
+    train_hyperparams.pop("lr_scale", None)
+    yolo_request = YoloTrainRequest(
+        model_name_or_path=model_name_or_path,
+        data_yaml=str(resolved_data_path.resolve()),
+        strategy="default",
+        device_policy=device_policy,
+        hyperparams=train_hyperparams,
+        dataset_id=request.dataset_id,
+        train_mode="from_pretrained",
+    )
+    job_id = uuid4().hex
+    job_store.create_job(job_id)
+    outputs_dir = Path("outputs") / job_id
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    thread = Thread(
+        target=_run_yolo_job,
+        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams),
+        daemon=True,
+    )
     thread.start()
     return TrainResponse(job_id=job_id, status="queued")
 

@@ -1,4 +1,4 @@
-from typing import Any, Dict, Optional, Literal
+from typing import Any, Dict, Optional, Literal, Union
 
 from pydantic import BaseModel, Field
 
@@ -35,3 +35,22 @@ class TrainStatusResponse(BaseModel):
     status: str
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+
+
+class YoloTrainNewParams(BaseModel):
+    epochs: int = Field(50, description="Number of training epochs")
+    imgsz: int = Field(640, description="Training image size")
+    batch: Union[int, str] = Field("auto", description="Batch size or auto")
+    patience: int = Field(10, description="Early stopping patience")
+    augment_level: str = Field("default", description="Augmentation level label")
+    lr_scale: float = Field(1.0, description="Learning rate scale factor")
+    device_policy: str = Field("auto", description="Device policy, e.g. auto/cpu")
+    seed: Optional[int] = Field(None, description="Random seed")
+    val: bool = Field(True, description="Run validation")
+    save: bool = Field(True, description="Save checkpoints")
+
+
+class YoloTrainNewRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset identifier")
+    model_spec: str = Field(..., description="YOLO model spec name")
+    params: YoloTrainNewParams = Field(..., description="Training parameters")
