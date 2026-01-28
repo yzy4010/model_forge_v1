@@ -1,5 +1,5 @@
 from typing import Any, Dict
-
+from typing import Optional
 from pydantic import BaseModel
 
 
@@ -17,4 +17,4 @@ class DatasetInfoResponse(BaseModel):
     extracted_dir: str
     resolved_data_yaml_path: str
     stats: Dict[str, Any]
-    created_at: str | None
+    created_at: Optional[str]
