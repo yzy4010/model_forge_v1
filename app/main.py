@@ -8,15 +8,17 @@ import re
 from uuid import uuid4
 
 from clearml import Task
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, HTTPException
 import csv
 import json
-import os
-import shutil
 import zipfile
 import yaml
 
-from app.schemas.datasets import DatasetInfoResponse, DatasetUploadResponse
+from app.schemas.datasets import (
+    DatasetInfoResponse,
+    DatasetRegisterLocalRequest,
+    DatasetRegisterLocalResponse,
+)
 from app.schemas.train import (
     TrainResponse,
     TrainStatusResponse,
@@ -232,25 +234,6 @@ def _load_resolved_data_yaml(dataset_id: str) -> Path:
     return resolved_path
 
 
-def _safe_extract_zip(zip_path: Path, extracted_dir: Path) -> None:
-    extracted_dir.mkdir(parents=True, exist_ok=True)
-    base_dir = extracted_dir.resolve()
-    with zipfile.ZipFile(zip_path) as archive:
-        for member in archive.infolist():
-            member_path = Path(member.filename)
-            if member_path.is_absolute():
-                raise HTTPException(status_code=400, detail="zip entry contains absolute path")
-            resolved_path = (base_dir / member_path).resolve()
-            if not str(resolved_path).startswith(str(base_dir) + os.sep):
-                raise HTTPException(status_code=400, detail="zip entry outside extracted directory")
-            if member.is_dir():
-                resolved_path.mkdir(parents=True, exist_ok=True)
-                continue
-            resolved_path.parent.mkdir(parents=True, exist_ok=True)
-            with archive.open(member) as source, resolved_path.open("wb") as target:
-                shutil.copyfileobj(source, target)
-
-
 def _coerce_names(raw_names: Any) -> list[str]:
     if isinstance(raw_names, list):
         return [str(name) for name in raw_names]
@@ -261,17 +244,6 @@ def _coerce_names(raw_names: Any) -> list[str]:
             sorted_items = sorted(raw_names.items(), key=lambda item: str(item[0]))
         return [str(value) for _, value in sorted_items]
     raise HTTPException(status_code=400, detail="names must be a list or mapping")
-
-
-def _normalize_dataset_path(base_dir: Path, raw_path: str) -> Path:
-    candidate = Path(raw_path)
-    parts = list(candidate.parts)
-    if candidate.is_absolute() and candidate.anchor in parts:
-        parts = [part for part in parts if part != candidate.anchor]
-    normalized_parts = [part for part in parts if part not in (".", "..", "")]
-    if not normalized_parts:
-        return base_dir.resolve()
-    return (base_dir / Path(*normalized_parts)).resolve()
 
 
 def _count_files(directory: Path, extensions: set[str]) -> int:
@@ -290,121 +262,142 @@ def _count_labels(directory: Path) -> int:
     return sum(1 for path in directory.rglob("*") if path.is_file() and path.suffix == ".txt")
 
 
-@app.post("/datasets/upload", response_model=DatasetUploadResponse)
-def upload_dataset(
-    file: UploadFile = File(...),
-    name: Optional[str] = Form(None),
-) -> DatasetUploadResponse:
-    dataset_id = uuid4().hex
-    created_at = utc_now_iso()
-    datasets_root = Path("datasets")
-    dataset_dir = datasets_root / dataset_id
-    extracted_dir = dataset_dir / "extracted"
-    raw_zip_path = dataset_dir / "raw.zip"
-    dataset_dir.mkdir(parents=True, exist_ok=True)
+def _resolve_data_yaml_source(root_dir: Path, data_yaml: Optional[str]) -> Path:
+    if data_yaml is None or str(data_yaml).strip() == "":
+        return (root_dir / "data.yaml").expanduser().resolve()
+    candidate = Path(str(data_yaml)).expanduser()
+    if not candidate.is_absolute():
+        candidate = root_dir / candidate
+    return candidate.resolve()
 
-    with raw_zip_path.open("wb") as target:
-        shutil.copyfileobj(file.file, target)
 
-    _safe_extract_zip(raw_zip_path, extracted_dir)
+def _build_resolved_data_yaml(
+    root_dir: Path,
+    nc_value: int,
+    names_list: list[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    train_images_dir = root_dir / "train" / "images"
+    train_labels_dir = root_dir / "train" / "labels"
+    if (
+        not train_images_dir.exists()
+        or not train_images_dir.is_dir()
+        or not train_labels_dir.exists()
+        or not train_labels_dir.is_dir()
+    ):
+        raise HTTPException(status_code=400, detail="train structure invalid")
 
-    data_yaml_path = extracted_dir / "data.yaml"
-    if not data_yaml_path.exists():
-        raise HTTPException(status_code=400, detail="data.yaml not found in extracted dataset")
+    valid_images_dir = root_dir / "valid" / "images"
+    valid_labels_dir = root_dir / "valid" / "labels"
+    val_images_dir = root_dir / "val" / "images"
+    val_labels_dir = root_dir / "val" / "labels"
 
-    raw_data_text = data_yaml_path.read_text(encoding="utf-8")
-    raw_data = yaml.safe_load(raw_data_text)
+    if (
+        valid_images_dir.exists()
+        and valid_images_dir.is_dir()
+        and valid_labels_dir.exists()
+        and valid_labels_dir.is_dir()
+    ):
+        val_images = valid_images_dir
+        val_labels = valid_labels_dir
+    elif (
+        val_images_dir.exists()
+        and val_images_dir.is_dir()
+        and val_labels_dir.exists()
+        and val_labels_dir.is_dir()
+    ):
+        val_images = val_images_dir
+        val_labels = val_labels_dir
+    else:
+        raise HTTPException(status_code=400, detail="missing val/valid")
+
+    test_images_dir = root_dir / "test" / "images"
+    test_labels_dir = root_dir / "test" / "labels"
+
+    resolved_data = {
+        "train": train_images_dir.resolve().as_posix(),
+        "val": val_images.resolve().as_posix(),
+        "nc": nc_value,
+        "names": names_list,
+    }
+    if test_images_dir.exists():
+        resolved_data["test"] = test_images_dir.resolve().as_posix()
+
+    stats = {
+        "nc": nc_value,
+        "names": names_list,
+        "train_images": _count_files(train_images_dir, IMAGE_EXTENSIONS),
+        "valid_images": _count_files(val_images, IMAGE_EXTENSIONS),
+        "test_images": _count_files(test_images_dir, IMAGE_EXTENSIONS),
+        "train_labels": _count_labels(train_labels_dir),
+        "valid_labels": _count_labels(val_labels),
+        "test_labels": _count_labels(test_labels_dir),
+    }
+    return resolved_data, stats
+
+
+@app.post("/datasets/register_local", response_model=DatasetRegisterLocalResponse)
+def register_local_dataset(
+    request: DatasetRegisterLocalRequest,
+) -> DatasetRegisterLocalResponse:
+    root_dir = Path(request.root_dir).expanduser()
+    if not root_dir.exists() or not root_dir.is_dir():
+        raise HTTPException(status_code=400, detail="root_dir invalid")
+    root_dir = root_dir.resolve()
+
+    data_yaml_source = _resolve_data_yaml_source(root_dir, request.data_yaml)
+    if not data_yaml_source.exists() or not data_yaml_source.is_file():
+        raise HTTPException(status_code=400, detail="missing data.yaml")
+
+    try:
+        raw_data = yaml.safe_load(data_yaml_source.read_text(encoding="utf-8"))
+    except yaml.YAMLError as exc:
+        raise HTTPException(status_code=400, detail="data.yaml invalid") from exc
     if not isinstance(raw_data, dict):
-        raise HTTPException(status_code=400, detail="data.yaml must contain a mapping")
-
-    if "train" not in raw_data or "val" not in raw_data:
-        raise HTTPException(status_code=400, detail="data.yaml must include train and val entries")
+        raise HTTPException(status_code=400, detail="data.yaml invalid")
 
     if "nc" not in raw_data or "names" not in raw_data:
-        raise HTTPException(status_code=400, detail="data.yaml must include nc and names entries")
+        raise HTTPException(status_code=400, detail="nc names missing")
 
     try:
         nc_value = int(raw_data["nc"])
     except (TypeError, ValueError):
-        raise HTTPException(status_code=400, detail="nc must be an integer") from None
+        raise HTTPException(status_code=400, detail="nc invalid") from None
 
     names_list = _coerce_names(raw_data["names"])
     if len(names_list) != nc_value:
-        raise HTTPException(status_code=400, detail="names length must match nc")
+        raise HTTPException(status_code=400, detail="nc names mismatch")
 
-    train_dir = _normalize_dataset_path(extracted_dir, str(raw_data["train"]))
-    val_dir = _normalize_dataset_path(extracted_dir, str(raw_data["val"]))
-    test_dir = None
-    if raw_data.get("test") is not None:
-        test_dir = _normalize_dataset_path(extracted_dir, str(raw_data["test"]))
+    resolved_data, stats = _build_resolved_data_yaml(root_dir, nc_value, names_list)
 
-    if not train_dir.exists():
-        raise HTTPException(status_code=400, detail="train images directory not found")
-    if not val_dir.exists():
-        raise HTTPException(status_code=400, detail="val images directory not found")
-
-    train_labels_dir = train_dir.parent / "labels"
-    val_labels_dir = val_dir.parent / "labels"
-    if not train_labels_dir.exists():
-        raise HTTPException(status_code=400, detail="train labels directory not found")
-    if not val_labels_dir.exists():
-        raise HTTPException(status_code=400, detail="val labels directory not found")
-
-    train_images = _count_files(train_dir, IMAGE_EXTENSIONS)
-    val_images = _count_files(val_dir, IMAGE_EXTENSIONS)
-    test_images = _count_files(test_dir, IMAGE_EXTENSIONS) if test_dir and test_dir.exists() else 0
-
-    train_labels = _count_labels(train_labels_dir)
-    val_labels = _count_labels(val_labels_dir)
-    test_labels_dir = test_dir.parent / "labels" if test_dir else None
-    test_labels = _count_labels(test_labels_dir) if test_labels_dir else 0
-
-    resolved_data = dict(raw_data)
-    resolved_data["train"] = train_dir.resolve().as_posix()
-    resolved_data["val"] = val_dir.resolve().as_posix()
-    resolved_data["nc"] = nc_value
-    resolved_data["names"] = names_list
-    if test_dir and test_dir.exists():
-        resolved_data["test"] = test_dir.resolve().as_posix()
-    else:
-        resolved_data.pop("test", None)
-
+    dataset_id = uuid4().hex
+    created_at = utc_now_iso()
+    dataset_dir = Path("datasets") / dataset_id
+    dataset_dir.mkdir(parents=True, exist_ok=True)
     resolved_yaml_path = dataset_dir / "resolved_data.yaml"
     resolved_yaml_path.write_text(
         yaml.safe_dump(resolved_data, sort_keys=False, allow_unicode=True),
         encoding="utf-8",
     )
 
-    stats = {
-        "train": {"images": train_images, "labels": train_labels},
-        "val": {"images": val_images, "labels": val_labels},
-        "test": {"images": test_images, "labels": test_labels},
-        "nc": nc_value,
-        "names": names_list,
-    }
-
     meta = {
         "dataset_id": dataset_id,
-        "name": name,
-        "dataset_dir": str(dataset_dir.resolve()),
-        "raw_zip_path": str(raw_zip_path.resolve()),
-        "extracted_dir": str(extracted_dir.resolve()),
+        "name": request.name,
+        "root_dir": str(root_dir),
+        "data_yaml_source_path": str(data_yaml_source),
         "resolved_data_yaml_path": str(resolved_yaml_path.resolve()),
         "stats": stats,
-        "raw_data_yaml": raw_data,
-        "raw_data_yaml_text": raw_data_text,
         "created_at": created_at,
     }
-
     meta_path = dataset_dir / "dataset_meta.json"
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    return DatasetUploadResponse(
+    return DatasetRegisterLocalResponse(
         dataset_id=dataset_id,
-        dataset_dir=str(dataset_dir.resolve()),
-        extracted_dir=str(extracted_dir.resolve()),
+        name=request.name,
+        root_dir=str(root_dir),
         resolved_data_yaml_path=str(resolved_yaml_path.resolve()),
         stats=stats,
+        created_at=created_at,
     )
 
 
@@ -418,10 +411,11 @@ def get_dataset_info(dataset_id: str) -> DatasetInfoResponse:
         meta = json.loads(meta_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=500, detail="dataset_meta.json is invalid") from exc
+    root_dir = meta.get("root_dir") or meta.get("dataset_dir") or ""
     return DatasetInfoResponse(
         dataset_id=meta.get("dataset_id", dataset_id),
-        dataset_dir=meta.get("dataset_dir", str(dataset_dir.resolve())),
-        extracted_dir=meta.get("extracted_dir"),
+        name=meta.get("name"),
+        root_dir=str(root_dir),
         resolved_data_yaml_path=meta.get("resolved_data_yaml_path"),
         stats=meta.get("stats", {}),
         created_at=meta.get("created_at"),

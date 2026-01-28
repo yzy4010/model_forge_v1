@@ -1,20 +1,27 @@
-from typing import Any, Dict
-from typing import Optional
+from typing import Any, Dict, Optional
+
 from pydantic import BaseModel
 
 
-class DatasetUploadResponse(BaseModel):
+class DatasetRegisterLocalRequest(BaseModel):
+    name: Optional[str] = None
+    root_dir: str
+    data_yaml: Optional[str] = None
+
+
+class DatasetRegisterLocalResponse(BaseModel):
     dataset_id: str
-    dataset_dir: str
-    extracted_dir: str
+    name: Optional[str]
+    root_dir: str
     resolved_data_yaml_path: str
     stats: Dict[str, Any]
+    created_at: Optional[str]
 
 
 class DatasetInfoResponse(BaseModel):
     dataset_id: str
-    dataset_dir: str
-    extracted_dir: str
+    name: Optional[str]
+    root_dir: str
     resolved_data_yaml_path: str
     stats: Dict[str, Any]
     created_at: Optional[str]

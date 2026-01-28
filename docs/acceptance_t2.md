@@ -10,24 +10,26 @@
 
 ---
 
-## A. 数据集上传验收
+## A. 本地数据集注册验收
 
-### A-1 成功场景：上传包含 train/valid/test + data.yaml 的 zip
+### A-1 成功场景：注册包含 train/valid/test + data.yaml 的目录
 
 **请求（curl）**
 
 ```bash
-curl -s -X POST "http://localhost:8000/datasets/upload" \
-  -F "file=@<DATASET_ZIP>" \
-  -H "Accept: application/json"
+curl -s -X POST "http://localhost:8000/datasets/register_local" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "smoking_v3",
+    "root_dir": "<DATASET_ROOT_DIR>",
+    "data_yaml": "data.yaml"
+  }'
 ```
 
 **期望**
 
 - 响应包含 `dataset_id`。
 - 服务器落盘存在以下文件：
-  - `datasets/<id>/raw.zip`
-  - `datasets/<id>/extracted/...`
   - `datasets/<id>/resolved_data.yaml`
   - `datasets/<id>/dataset_meta.json`
 
@@ -36,76 +38,61 @@ curl -s -X POST "http://localhost:8000/datasets/upload" \
 ```bash
 # 将 <DATASET_ID> 替换为响应返回值
 DATASET_ID=<DATASET_ID>
-ls -l datasets/${DATASET_ID}/raw.zip
-ls -l datasets/${DATASET_ID}/extracted/
 ls -l datasets/${DATASET_ID}/resolved_data.yaml
 ls -l datasets/${DATASET_ID}/dataset_meta.json
 ```
 
-### A-2 resolved_data.yaml 路径修正验证
-
-**输入的 data.yaml**
-
-```yaml
-train: ../train/images
-val: ../valid/images
-test: ../test/images
-```
+### A-2 resolved_data.yaml 路径验证
 
 **期望**
 
-- `resolved_data.yaml` 中的路径已修正为 **绝对路径**，且指向：
-  - `.../extracted/train/images`
-  - `.../extracted/valid/images`
-  - `.../extracted/test/images`
+- `resolved_data.yaml` 中的路径为 **绝对路径**，且指向 `root_dir` 下的真实目录。
+- 路径不包含 `../`。
 
 **验证示例**
 
 ```bash
 cat datasets/${DATASET_ID}/resolved_data.yaml
 # 期望输出包含类似：
-# train: /abs/path/.../datasets/<id>/extracted/train/images
-# val:   /abs/path/.../datasets/<id>/extracted/valid/images
-# test:  /abs/path/.../datasets/<id>/extracted/test/images
+# train: /abs/path/.../train/images
+# val:   /abs/path/.../valid/images 或 /abs/path/.../val/images
+# test:  /abs/path/.../test/images（存在则写）
 ```
 
-### A-3 错误场景：zip 中缺少 extracted/data.yaml
-
-**构造方式**
-
-- 准备一个 zip，结构中缺少 `extracted/data.yaml`。
+### A-3 错误场景：root_dir 不存在
 
 **请求（curl）**
 
 ```bash
-curl -s -X POST "http://localhost:8000/datasets/upload" \
-  -F "file=@<BROKEN_ZIP>" \
-  -H "Accept: application/json" -i
+curl -s -X POST "http://localhost:8000/datasets/register_local" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "root_dir": "/path/not/exist"
+  }' -i
 ```
 
 **期望**
 
 - 返回 **HTTP 400**。
-- 错误信息明确提示缺少 `data.yaml`。
+- 错误信息提示 `root_dir invalid`。
 
-### A-4 错误场景：zip 解压包含 ../ 路径逃逸
-
-**构造方式**
-
-- 在 zip 中放置包含 `../` 的路径条目（如 `../evil.txt`）。
+### A-4 错误场景：data.yaml 不存在
 
 **请求（curl）**
 
 ```bash
-curl -s -X POST "http://localhost:8000/datasets/upload" \
-  -F "file=@<ZIP_WITH_TRAVERSAL>" \
-  -H "Accept: application/json" -i
+curl -s -X POST "http://localhost:8000/datasets/register_local" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "root_dir": "<DATASET_ROOT_DIR>",
+    "data_yaml": "missing.yaml"
+  }' -i
 ```
 
 **期望**
 
 - 返回 **HTTP 400**。
-- 错误信息明确提示存在路径逃逸风险。
+- 错误信息提示 `missing data.yaml`。
 
 ---
 
