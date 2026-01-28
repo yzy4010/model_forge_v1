@@ -26,6 +26,7 @@ from app.schemas.train import (
 )
 from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
+from app.services.yolo_presets import resolve_augment_params, supports_freeze_param
 from app.trainers.yolo_ultralytics import run_yolo_train
 
 app = FastAPI(title="ModelForge v1")
@@ -48,10 +49,49 @@ def health_check() -> dict:
     return {"status": "ok", "project": "model_forge_v1"}
 
 
+def _cuda_is_available() -> bool:
+    try:
+        import torch
+    except Exception:
+        return False
+    return torch.cuda.is_available()
+
+
+def _resolve_device_policy(device_policy: str) -> tuple[str, str]:
+    normalized = device_policy.strip().lower()
+    if normalized not in {"auto", "cpu", "cuda"}:
+        raise HTTPException(status_code=400, detail="unsupported device_policy")
+    cuda_available = _cuda_is_available()
+    if normalized == "cuda":
+        if not cuda_available:
+            raise HTTPException(status_code=400, detail="cuda not available")
+        return "cuda", "cuda"
+    if normalized == "cpu":
+        return "cpu", "cpu"
+    if cuda_available:
+        return "cuda", "cuda"
+    return "cpu", "cpu"
+
+
 def _resolve_device(device_policy: str) -> str:
-    if device_policy.lower() in {"auto", "cpu"}:
-        return "cpu"
-    return device_policy
+    device, _ = _resolve_device_policy(device_policy)
+    return device
+
+
+def _resolve_batch_size(batch: int | str, device_kind: str) -> int:
+    if isinstance(batch, str):
+        if batch.lower() != "auto":
+            raise HTTPException(status_code=400, detail="unsupported batch value")
+        return 8 if device_kind == "cuda" else 2
+    if batch <= 0:
+        raise HTTPException(status_code=400, detail="batch must be positive")
+    return batch
+
+
+def _resolve_lr0(base_lr0: float, lr_scale: float) -> float:
+    if lr_scale not in {0.5, 1.0, 2.0}:
+        raise HTTPException(status_code=400, detail="unsupported lr_scale")
+    return base_lr0 * lr_scale
 
 
 def _coerce_value(value: str) -> Any:
@@ -657,11 +697,26 @@ def train_yolo_new(request: YoloTrainNewRequest) -> TrainResponse:
     resolved_data_path = _load_resolved_data_yaml(request.dataset_id)
     model_name_or_path = _resolve_model_spec(request.model_spec)
     params_payload = request.params.dict()
-    device_policy = params_payload.pop("device_policy", "auto")
+    device_policy = params_payload.get("device_policy", "auto")
+    augment_level = params_payload.get("augment_level", "default")
+    lr_scale = params_payload.get("lr_scale", 1.0)
     meta_hyperparams = {key: value for key, value in params_payload.items() if value is not None}
     train_hyperparams = dict(meta_hyperparams)
     train_hyperparams.pop("augment_level", None)
     train_hyperparams.pop("lr_scale", None)
+    train_hyperparams.pop("device_policy", None)
+    _, device_kind = _resolve_device_policy(device_policy)
+    batch_value = train_hyperparams.pop("batch", "auto")
+    train_hyperparams["batch"] = _resolve_batch_size(batch_value, device_kind)
+    try:
+        augment_params = resolve_augment_params(augment_level)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    train_hyperparams.update(augment_params)
+    base_lr0 = float(train_hyperparams.get("lr0", 0.01))
+    train_hyperparams["lr0"] = _resolve_lr0(base_lr0, lr_scale)
+    meta_hyperparams["batch"] = train_hyperparams["batch"]
+    meta_hyperparams["lr0"] = train_hyperparams["lr0"]
     yolo_request = YoloTrainRequest(
         model_name_or_path=model_name_or_path,
         data_yaml=str(resolved_data_path.resolve()),
@@ -696,11 +751,27 @@ def train_yolo_continue(request: YoloTrainContinueRequest) -> TrainResponse:
         raise HTTPException(status_code=400, detail="best.pt not found for base_job_id")
     resolved_data_path = _load_resolved_data_yaml(request.dataset_id)
     params_payload = request.params.dict()
-    device_policy = params_payload.pop("device_policy", "auto")
+    device_policy = params_payload.get("device_policy", "auto")
+    augment_level = params_payload.get("augment_level", "default")
+    lr_scale = params_payload.get("lr_scale", 1.0)
+    freeze_value = params_payload.get("freeze", 0)
     meta_hyperparams = {key: value for key, value in params_payload.items() if value is not None}
     train_hyperparams = dict(meta_hyperparams)
     train_hyperparams.pop("augment_level", None)
     train_hyperparams.pop("lr_scale", None)
+    train_hyperparams.pop("device_policy", None)
+    train_hyperparams.pop("freeze", None)
+    _, device_kind = _resolve_device_policy(device_policy)
+    batch_value = train_hyperparams.pop("batch", "auto")
+    train_hyperparams["batch"] = _resolve_batch_size(batch_value, device_kind)
+    try:
+        augment_params = resolve_augment_params(augment_level)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    train_hyperparams.update(augment_params)
+    base_lr0 = float(train_hyperparams.get("lr0", 0.01))
+    train_hyperparams["lr0"] = _resolve_lr0(base_lr0, lr_scale)
+    warnings: list[str] = []
 
     train_mode = "finetune"
     resume_from = None
@@ -720,6 +791,16 @@ def train_yolo_continue(request: YoloTrainContinueRequest) -> TrainResponse:
             raise HTTPException(
                 status_code=400, detail="resume_last not supported for base_job_id"
             )
+    if train_mode == "finetune" and freeze_value:
+        if supports_freeze_param():
+            train_hyperparams["freeze"] = freeze_value
+        else:
+            warnings.append("当前版本不支持 freeze")
+
+    if warnings:
+        meta_hyperparams["warnings"] = warnings
+    meta_hyperparams["batch"] = train_hyperparams["batch"]
+    meta_hyperparams["lr0"] = train_hyperparams["lr0"]
 
     yolo_request = YoloTrainRequest(
         model_name_or_path=model_name_or_path,
