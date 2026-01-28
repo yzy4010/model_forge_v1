@@ -54,3 +54,26 @@ class YoloTrainNewRequest(BaseModel):
     dataset_id: str = Field(..., description="Dataset identifier")
     model_spec: str = Field(..., description="YOLO model spec name")
     params: YoloTrainNewParams = Field(..., description="Training parameters")
+
+
+class YoloTrainContinueParams(BaseModel):
+    epochs: int = Field(20, description="Number of training epochs")
+    imgsz: int = Field(640, description="Training image size")
+    batch: Union[int, str] = Field("auto", description="Batch size or auto")
+    patience: int = Field(10, description="Early stopping patience")
+    augment_level: str = Field("default", description="Augmentation level label")
+    lr_scale: float = Field(1.0, description="Learning rate scale factor")
+    freeze: int = Field(0, description="Freeze layers count")
+    device_policy: str = Field("auto", description="Device policy, e.g. auto/cpu")
+    seed: Optional[int] = Field(None, description="Random seed")
+    val: bool = Field(True, description="Run validation")
+    save: bool = Field(True, description="Save checkpoints")
+
+
+class YoloTrainContinueRequest(BaseModel):
+    dataset_id: str = Field(..., description="Dataset identifier")
+    base_job_id: str = Field(..., description="Base job identifier")
+    continue_strategy: Literal["finetune_best", "resume_last"] = Field(
+        "finetune_best", description="Continue strategy"
+    )
+    params: YoloTrainContinueParams = Field(..., description="Training parameters")

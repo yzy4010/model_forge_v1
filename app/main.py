@@ -20,6 +20,7 @@ from app.schemas.datasets import DatasetInfoResponse, DatasetUploadResponse
 from app.schemas.train import (
     TrainResponse,
     TrainStatusResponse,
+    YoloTrainContinueRequest,
     YoloTrainNewRequest,
     YoloTrainRequest,
 )
@@ -140,6 +141,40 @@ def _find_results_csv(job_dir: Path) -> Optional[Path]:
         candidate = run_dir / "results.csv"
         if candidate.exists():
             return candidate
+    return None
+
+
+def _load_job_meta(job_id: str) -> dict[str, Any]:
+    meta_path = Path("outputs") / job_id / "meta.json"
+    if not meta_path.exists():
+        raise HTTPException(status_code=404, detail="base_job_id not found")
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=500, detail="base job meta invalid") from exc
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=500, detail="base job meta invalid")
+    return payload
+
+
+def _resolve_resume_dir(meta: dict[str, Any], base_job_id: str) -> Optional[Path]:
+    run_dir = meta.get("run_dir")
+    if run_dir:
+        candidate = Path(str(run_dir))
+        if candidate.exists():
+            return candidate
+    raw_run_dir = meta.get("raw_run_dir")
+    if raw_run_dir:
+        candidate = Path(str(raw_run_dir))
+        if candidate.exists():
+            latest = _find_latest_run_dir(candidate)
+            if latest:
+                return latest
+    raw_dir = Path("outputs") / base_job_id / "raw"
+    if raw_dir.exists():
+        latest = _find_latest_run_dir(raw_dir)
+        if latest:
+            return latest
     return None
 
 
@@ -635,6 +670,68 @@ def train_yolo_new(request: YoloTrainNewRequest) -> TrainResponse:
         hyperparams=train_hyperparams,
         dataset_id=request.dataset_id,
         train_mode="from_pretrained",
+    )
+    job_id = uuid4().hex
+    job_store.create_job(job_id)
+    outputs_dir = Path("outputs") / job_id
+    outputs_dir.mkdir(parents=True, exist_ok=True)
+    thread = Thread(
+        target=_run_yolo_job,
+        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams),
+        daemon=True,
+    )
+    thread.start()
+    return TrainResponse(job_id=job_id, status="queued")
+
+
+@app.post("/train/yolo/continue", response_model=TrainResponse)
+def train_yolo_continue(request: YoloTrainContinueRequest) -> TrainResponse:
+    base_record = job_store.get_job(request.base_job_id)
+    if base_record is None:
+        raise HTTPException(status_code=404, detail="base_job_id not found")
+    base_meta = _load_job_meta(request.base_job_id)
+    base_artifacts_dir = Path("outputs") / request.base_job_id / "artifacts"
+    best_weight = base_artifacts_dir / "best.pt"
+    if not best_weight.exists():
+        raise HTTPException(status_code=400, detail="best.pt not found for base_job_id")
+    resolved_data_path = _load_resolved_data_yaml(request.dataset_id)
+    params_payload = request.params.dict()
+    device_policy = params_payload.pop("device_policy", "auto")
+    meta_hyperparams = {key: value for key, value in params_payload.items() if value is not None}
+    train_hyperparams = dict(meta_hyperparams)
+    train_hyperparams.pop("augment_level", None)
+    train_hyperparams.pop("lr_scale", None)
+
+    train_mode = "finetune"
+    resume_from = None
+    model_name_or_path = str(best_weight.resolve())
+    base_weight = "best.pt"
+    if request.continue_strategy == "resume_last":
+        train_mode = "resume"
+        base_weight = "last.pt"
+        last_weight = base_artifacts_dir / "last.pt"
+        if last_weight.exists():
+            resume_from = str(last_weight.resolve())
+        else:
+            resume_dir = _resolve_resume_dir(base_meta, request.base_job_id)
+            if resume_dir:
+                resume_from = str(resume_dir.resolve())
+        if resume_from is None:
+            raise HTTPException(
+                status_code=400, detail="resume_last not supported for base_job_id"
+            )
+
+    yolo_request = YoloTrainRequest(
+        model_name_or_path=model_name_or_path,
+        data_yaml=str(resolved_data_path.resolve()),
+        strategy=request.continue_strategy,
+        device_policy=device_policy,
+        hyperparams=train_hyperparams,
+        dataset_id=request.dataset_id,
+        train_mode=train_mode,
+        base_job_id=request.base_job_id,
+        base_weight=base_weight,
+        resume_from=resume_from,
     )
     job_id = uuid4().hex
     job_store.create_job(job_id)
