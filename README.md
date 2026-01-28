@@ -4,6 +4,8 @@
 
 ModelForge v1：提供 **本地数据集注册** + **YOLO 训练** 的轻量服务端，面向前端/手动调用即可完成训练闭环。
 
+- 接口对接文档：[`docs/api_integration.md`](docs/api_integration.md)
+
 ---
 
 ## 环境要求
