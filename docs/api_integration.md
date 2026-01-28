@@ -236,13 +236,19 @@
   - 默认行为：无。
   - 常见错误：`dataset_id not found`（数据集不存在）。
 - `model_spec`
-  - 含义：模型规格。
+  - 含义：模型规格（YOLOv8 系列），决定训练起点权重与算力消耗。
   - 是否必填：是。
-  - 取值范围/枚举：`yolov8n` / `yolov8s` / `yolov26`。
-  - 默认行为：无。
+  - 取值范围/枚举：`yolov8n` / `yolov8s` / `yolov8m`。
+  - 默认行为：无（必须显式指定）。
+  - 说明：
+    - `yolov8n`：最轻最快，适合 CPU/快速验证，精度较低。
+    - `yolov8s`：更均衡，速度快且精度明显提升，常用默认选择。
+    - `yolov8m`：精度更高，训练更慢、资源需求更大，适合追求更好效果的场景（建议 GPU）。
   - 常见错误：
-    - `unsupported model_spec`（不在枚举内）。
-    - `yolov26.pt not found; please provide weights`（本地缺少 yolov26 权重）。
+    - `Unsupported model_spec: xxx. Allowed: yolov8n, yolov8s, yolov8m`（不在枚举内）。
+    - `Failed to download yolov8m.pt...`（无网络首次下载失败 → 将 `yolov8m.pt` 放到权重目录）。
+    - `CUDA out of memory`（GPU 不可用或 batch/imgsz 过大导致 OOM → 降低 batch/imgsz 或改用 `yolov8s`/`yolov8n`）。
+    - `...not found`（权重文件缺失/路径错误 → 检查权重目录与文件名）。
 - `params`
   - 含义：训练参数对象。
   - 是否必填：是。
@@ -339,8 +345,11 @@
 
 **常见错误与排查**
 
-1. `unsupported model_spec`：检查 `model_spec` 是否在枚举内。
-2. `unsupported lr_scale` / `unsupported device_policy`：检查参数是否在允许范围内。
+1. `Unsupported model_spec: xxx. Allowed: yolov8n, yolov8s, yolov8m`：检查 `model_spec` 是否在枚举内。
+2. `Failed to download yolov8m.pt...`：离线环境首次下载失败时，将 `yolov8m.pt` 放到权重目录并重试。
+3. `CUDA out of memory`：GPU 不可用或 batch/imgsz 过大导致 OOM，建议降低 batch/imgsz 或改用 `yolov8s`/`yolov8n`。
+4. `...not found`：权重文件缺失或路径错误，检查权重目录与文件名。
+5. `unsupported lr_scale` / `unsupported device_policy`：检查参数是否在允许范围内。
 
 ---
 
@@ -759,4 +768,3 @@
 
 1. `training not finished`：需等待任务完成。
 2. `meta.json not found` / `meta.json invalid`：训练产出异常或文件损坏，建议重新训练。
-

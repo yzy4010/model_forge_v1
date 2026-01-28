@@ -34,10 +34,11 @@ app = FastAPI(title="ModelForge v1")
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 MODEL_SPEC_WEIGHTS = {
-    "yolov8s": "yolov8s.pt",
     "yolov8n": "yolov8n.pt",
-    "yolov26": "yolov26.pt",
+    "yolov8s": "yolov8s.pt",
+    "yolov8m": "yolov8m.pt",
 }
+ALLOWED_MODEL_SPECS = tuple(MODEL_SPEC_WEIGHTS.keys())
 
 
 @app.get("/")
@@ -111,16 +112,33 @@ def _get_value(payload: dict[str, str], options: Iterable[str]) -> Optional[Any]
     return None
 
 
+def _ensure_model_weights_available(weight: str) -> None:
+    if Path(weight).exists():
+        return
+    from ultralytics import YOLO
+
+    try:
+        YOLO(weight)
+    except Exception as exc:
+        weights_dir = Path(weight).resolve().parent
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Failed to download {weight}. Please place {weight} in {weights_dir} and retry."
+            ),
+        ) from exc
+
+
 def _resolve_model_spec(model_spec: str) -> str:
     normalized = model_spec.strip().lower()
     if normalized not in MODEL_SPEC_WEIGHTS:
-        raise HTTPException(status_code=400, detail="unsupported model_spec")
-    weight = MODEL_SPEC_WEIGHTS[normalized]
-    if normalized == "yolov26" and not Path(weight).exists():
+        allowed = ", ".join(ALLOWED_MODEL_SPECS)
         raise HTTPException(
             status_code=400,
-            detail="yolov26.pt not found; please provide weights",
+            detail=f"Unsupported model_spec: {model_spec}. Allowed: {allowed}",
         )
+    weight = MODEL_SPEC_WEIGHTS[normalized]
+    _ensure_model_weights_available(weight)
     return weight
 
 
@@ -874,4 +892,3 @@ def get_train_result(job_id: str) -> dict:
         "created_at": meta.get("created_at"),
         "finished_at": meta.get("finished_at"),
     }
-
