@@ -45,7 +45,9 @@ class YoloTrainNewParams(BaseModel):
 
 class YoloTrainNewRequest(BaseModel):
     dataset_id: str = Field(..., description="Dataset identifier")
-    model_spec: str = Field(..., description="YOLO model spec name")
+    model_spec: Literal["yolov8n", "yolov8s", "yolov8m"] = Field(
+        ..., description="YOLO model spec name"
+    )
     params: YoloTrainNewParams = Field(..., description="Training parameters")
 
 

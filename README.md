@@ -44,6 +44,12 @@ python -m uvicorn app.main:app --reload
 
 ---
 
+## 支持的 model_spec
+
+- yolov8n / yolov8s / yolov8m
+
+---
+
 ## 最小跑通（复制即可）
 
 ### 1) register_local
