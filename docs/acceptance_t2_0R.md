@@ -1,43 +1,68 @@
-# T2.0R 端到端验收清单（本地路径注册）
+# T2.0R 本地数据集注册验收（register_local）
 
-> 目标：覆盖本地路径注册、失败场景以及新训/继续训端到端流程。
+> 目标：覆盖 **register_local** 请求体字段说明、Windows 路径注意事项、resolved_data.yaml 生成规则与失败用例。
 
-## A. 注册本地数据集（成功）
+## A. 请求体字段说明
 
-调用 `POST /datasets/register_local`：
+`POST /datasets/register_local`
 
-- `root_dir` 指向一个真实 YOLO 数据集目录（包含 train/valid/test + data.yaml）
+```json
+{
+  "name": "smoking_v3",
+  "root_dir": "D:/datasets/smoking.v3i.yolov8",
+  "data_yaml": "data.yaml"
+}
+```
 
-**期望**
+- `name`（可选）：数据集名称，仅记录在元数据中。
+- `root_dir`（必填）：本地 YOLO 数据集根目录（包含 `train/`, `valid/` 或 `val/`, `test/`，以及 `data.yaml`）。
+- `data_yaml`（可选）：
+  - 为空时默认 `root_dir/data.yaml`。
+  - 可以使用相对路径（相对 `root_dir`）或绝对路径。
 
-- 返回 `dataset_id`
-- 磁盘存在：
-  - `datasets/<dataset_id>/dataset_meta.json`
-  - `datasets/<dataset_id>/resolved_data.yaml`
-- `resolved_data.yaml`：
-  - train/val/test 路径均指向 `root_dir` 下（绝对路径）
-  - 不包含 `../`
-- `GET /datasets/{dataset_id}` 能返回同样信息
+### Windows 路径 JSON 转义
 
-## B. 注册失败场景
+- 推荐使用 `/`：`D:/datasets/smoking.v3i.yolov8`
+- 或使用双反斜杠：`D:\\datasets\\smoking.v3i.yolov8`
+- **不要**使用单个 `\`，避免 `JSON Invalid \escape`。
 
-- `root_dir` 不存在 -> 400（提示 `root_dir invalid`）
-- `data.yaml` 不存在 -> 400（提示 `missing data.yaml`）
-- `train/images` 或 `train/labels` 不存在 -> 400（提示 `train structure invalid`）
-- `valid`/`val` 缺失 -> 400（提示 `missing val/valid`）
-- `nc` 与 `names` 不一致 -> 400
+---
 
-## C. 端到端训练（新训）
+## B. resolved_data.yaml 生成规则
 
-- 使用上一步 `dataset_id` 调用 `POST /train/yolo/new`，`epochs=2`
-- `/train/{job_id}/progress`：
-  - `epochs_done` 从 0 -> 1 -> 2
-- `/train/{job_id}/result`（completed）：
-  - `artifacts` 包含 `best.pt`/`last.pt`/`results.csv`/`args.yaml`（存在则列）
-  - `bundle.zip_path` 指向存在的 zip 文件
+- 生成位置：`datasets/<dataset_id>/resolved_data.yaml`
+- 路径规则：
+  - `train` 强制指向 `root_dir/train/images`
+  - `val` 强制指向 `root_dir/valid/images`，若 `valid/` 不存在则使用 `root_dir/val/images`
+  - `test` 仅在 `root_dir/test/images` 存在时写入
+- 所有路径必须为绝对路径，且 **不允许出现 `../`**。
+- `names` 与 `nc` 必须一致，否则拒绝注册。
 
-## D. 端到端训练（继续训 finetune_best）
+---
 
-- 用 `base_job_id` 调用 `POST /train/yolo/continue`，`epochs=2`
-- 返回新 `job_id`，且不覆盖 `base_job` 输出
-- `result` 完整同上
+## C. 失败用例验收
+
+### C-1 root_dir 不存在
+
+- 请求：`root_dir` 指向不存在路径
+- 期望：HTTP 400，`root_dir invalid`
+
+### C-2 data.yaml 不存在/找不到
+
+- 请求：`data_yaml` 指向不存在文件
+- 期望：HTTP 400，`missing data.yaml`
+
+### C-3 train 结构缺失
+
+- 缺少 `train/images` 或 `train/labels`
+- 期望：HTTP 400，`train structure invalid`
+
+### C-4 valid/val 缺失
+
+- `valid/images` + `valid/labels` 不存在，且 `val/images` + `val/labels` 也不存在
+- 期望：HTTP 400，`missing val/valid`
+
+### C-5 nc 与 names 长度不一致
+
+- `data.yaml` 中 `nc` 与 `names` 长度不一致
+- 期望：HTTP 400，`nc names mismatch`

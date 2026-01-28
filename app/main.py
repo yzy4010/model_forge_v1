@@ -21,7 +21,6 @@ from app.schemas.datasets import (
 )
 from app.schemas.train import (
     TrainResponse,
-    TrainStatusResponse,
     YoloTrainContinueRequest,
     YoloTrainNewRequest,
     YoloTrainRequest,
@@ -473,35 +472,6 @@ def _resolve_epochs_total(job_dir: Path) -> Optional[int]:
     return None
 
 
-def _build_logs_summary(job_id: str, meta: dict[str, Any]) -> dict[str, Any]:
-    job_dir = Path("outputs") / job_id
-    results_path = _find_results_csv(job_dir)
-    results = _parse_results_csv(results_path) if results_path else []
-    best_entry = max(
-        (entry for entry in results if entry.get("map50") is not None),
-        key=lambda entry: entry["map50"],
-        default=None,
-    )
-    metrics_summary = {
-        "best_epoch": best_entry["epoch"] if best_entry else None,
-        "best_map50": best_entry["map50"] if best_entry else None,
-        "best_map50_95": best_entry["map50_95"] if best_entry else None,
-    }
-    dataset = meta.get("dataset") or {}
-    model = meta.get("model") or {}
-    return {
-        "job_id": job_id,
-        "train_mode": meta.get("train_mode"),
-        "dataset_id": dataset.get("dataset_id"),
-        "model_name_or_path": model.get("name_or_path"),
-        "hyperparams": meta.get("hyperparams") or {},
-        "artifacts": meta.get("artifacts") or [],
-        "metrics_summary": metrics_summary,
-        "created_at": meta.get("created_at"),
-        "finished_at": meta.get("finished_at"),
-    }
-
-
 def _build_result_bundle(job_id: str, meta: dict[str, Any]) -> Path:
     job_dir = Path("outputs") / job_id
     bundle_dir = job_dir / "bundle"
@@ -677,15 +647,6 @@ def _run_yolo_job(
             task.close()
 
 
-@app.post("/train/yolo", response_model=TrainResponse)
-def train_yolo(request: YoloTrainRequest) -> TrainResponse:
-    job_id = uuid4().hex
-    job_store.create_job(job_id)
-    thread = Thread(target=_run_yolo_job, args=(job_id, request), daemon=True)
-    thread.start()
-    return TrainResponse(job_id=job_id, status="queued")
-
-
 @app.post("/train/yolo/new", response_model=TrainResponse)
 def train_yolo_new(request: YoloTrainNewRequest) -> TrainResponse:
     resolved_data_path = _load_resolved_data_yaml(request.dataset_id)
@@ -821,39 +782,6 @@ def train_yolo_continue(request: YoloTrainContinueRequest) -> TrainResponse:
     return TrainResponse(job_id=job_id, status="queued")
 
 
-@app.get("/train/{job_id}", response_model=TrainStatusResponse)
-def get_train_status(job_id: str) -> TrainStatusResponse:
-    record = job_store.get_job(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="job_id not found")
-    return TrainStatusResponse(
-        job_id=job_id,
-        status=record.status,
-        error=record.error,
-        result=record.result,
-    )
-
-
-@app.get("/train/{job_id}/logs")
-def get_train_logs(job_id: str) -> dict:
-    record = job_store.get_job(job_id)
-    if record is None:
-        raise HTTPException(status_code=404, detail="job_id not found")
-    if record.status != "completed":
-        raise HTTPException(
-            status_code=409, detail="training logs available after completion"
-        )
-    job_dir = Path("outputs") / job_id
-    meta_path = job_dir / "meta.json"
-    if not meta_path.exists():
-        raise HTTPException(status_code=404, detail="meta.json not found")
-    try:
-        meta = json.loads(meta_path.read_text(encoding="utf-8"))
-    except json.JSONDecodeError:
-        raise HTTPException(status_code=500, detail="meta.json invalid")
-    return _build_logs_summary(job_id, meta)
-
-
 @app.get("/train/{job_id}/progress")
 def get_train_progress(job_id: str, history_tail_size: int = 5) -> dict:
     record = job_store.get_job(job_id)
@@ -947,7 +875,3 @@ def get_train_result(job_id: str) -> dict:
         "finished_at": meta.get("finished_at"),
     }
 
-
-@app.get("/train/{job_id}/stream")
-def get_train_stream(job_id: str) -> dict:
-    return get_train_result(job_id)
