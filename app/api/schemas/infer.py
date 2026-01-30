@@ -27,10 +27,16 @@ class InferParams(BaseModel):
 
 class InferStreamRequest(BaseModel):
     stream_url: str = Field(..., description="Stream URL or source")
+    sample_fps: Optional[float] = Field(
+        5.0, description="Sampling FPS for RTSP reader"
+    )
+    webhook_url: Optional[str] = Field(
+        default=None, description="Webhook URL for inference events"
+    )
     scenario: ScenarioSnapshot = Field(..., description="Scenario snapshot")
     params: InferParams = Field(..., description="Inference parameters")
 
 
 class InferStartResponse(BaseModel):
-    stream_id: str = Field(..., description="Stream identifier")
+    job_id: str = Field(..., description="Inference job identifier")
     status: str = Field(..., description="Start status")

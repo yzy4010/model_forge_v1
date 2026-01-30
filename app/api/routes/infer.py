@@ -1,0 +1,106 @@
+from __future__ import annotations
+
+import logging
+from threading import Thread
+from typing import Dict
+
+from fastapi import APIRouter, HTTPException
+
+from app.api.schemas.infer import InferStartResponse, InferStreamRequest
+from app.infer.inferencer import AliasModel, run_frame
+from app.infer.job import InferenceJob
+from app.infer.job_manager import JobManager
+from app.infer.model_loader import load_models
+from app.infer.push import WebhookSender
+from app.infer.stream.rtsp_reader import iter_rtsp_frames
+
+logger = logging.getLogger("model_forge.infer.routes")
+
+router = APIRouter(prefix="/infer", tags=["infer"])
+
+job_manager = JobManager()
+
+DEFAULT_SAMPLE_FPS = 5.0
+DEFAULT_WEBHOOK_URL = "http://localhost:8001/webhook"
+
+
+def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
+    loaded = load_models([req.scenario.model])
+    models_by_alias: Dict[str, AliasModel] = {}
+    for alias, model in loaded.items():
+        models_by_alias[alias] = AliasModel(
+            yolo=model.yolo,
+            conf=req.params.conf,
+            iou=req.params.iou,
+            imgsz=req.params.imgsz,
+            max_det=req.params.max_det,
+            job_id=job_id,
+            scenario_id=req.scenario.scenario_id,
+        )
+    return models_by_alias
+
+
+def _update_job_on_exit(job: InferenceJob | None) -> None:
+    if job and job.is_running():
+        job.stop()
+
+
+def _run_job(
+    job_id: str,
+    rtsp_url: str,
+    sample_fps: float,
+    models_by_alias: Dict[str, AliasModel],
+    sender: WebhookSender,
+) -> None:
+    try:
+        for frame_idx, ts_ms, frame in iter_rtsp_frames(rtsp_url, sample_fps):
+            job = job_manager.get_job(job_id)
+            if job is None or not job.is_running():
+                break
+            event = run_frame(models_by_alias, frame, ts_ms, frame_idx)
+            sender.enqueue(event)
+            job.frame_idx = frame_idx
+    except Exception:
+        logger.exception("Inference job failed (job_id=%s)", job_id)
+    finally:
+        sender.stop(timeout_s=1.0)
+        _update_job_on_exit(job_manager.get_job(job_id))
+
+
+@router.post("/stream", response_model=InferStartResponse)
+def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
+    if not req.stream_url:
+        raise HTTPException(status_code=400, detail="stream_url is required")
+
+    job_id = job_manager.start_job(
+        {
+            "scenario_id": req.scenario.scenario_id,
+            "rtsp_url": req.stream_url,
+            "sample_fps": req.sample_fps,
+        }
+    )
+    try:
+        models_by_alias = _build_models(req, job_id)
+        webhook_url = req.webhook_url or DEFAULT_WEBHOOK_URL
+        sender = WebhookSender(webhook_url)
+    except Exception:
+        job_manager.stop_job(job_id)
+        raise
+
+    sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
+    thread = Thread(
+        target=_run_job,
+        args=(job_id, req.stream_url, sample_fps, models_by_alias, sender),
+        daemon=True,
+    )
+    thread.start()
+
+    return InferStartResponse(job_id=job_id, status="running")
+
+
+@router.post("/{job_id}/stop")
+def stop_infer_stream(job_id: str) -> dict:
+    stopped = job_manager.stop_job(job_id)
+    if not stopped:
+        raise HTTPException(status_code=404, detail="job not found")
+    return {"job_id": job_id, "status": "stopped"}
