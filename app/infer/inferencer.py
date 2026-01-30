@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import base64
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, TypedDict
+from typing import Any, Dict, List, Mapping, TypedDict
 
-import cv2
+from app.infer.storage import save_overlay
+from app.infer.visualize import draw_detections
 
 
 class Detection(TypedDict):
@@ -26,17 +26,7 @@ class Conclusion(TypedDict):
 
 
 class EventImage(TypedDict):
-    data: str
-    mime_type: str
-    width: int
-    height: int
-
-
-class AliasResult(TypedDict, total=False):
-    detections: List[Detection]
-    summary: Summary
-    conclusion: Conclusion
-    image: EventImage
+    overlay_path: str
 
 
 class InferFrameEvent(TypedDict):
@@ -58,18 +48,11 @@ class AliasModel:
     scenario_id: str
 
 
-def _encode_image(frame: Any) -> EventImage:
-    height, width = frame.shape[:2]
-    ok, buffer = cv2.imencode(".jpg", frame)
-    if not ok:
-        raise ValueError("Failed to encode frame image")
-    encoded = base64.b64encode(buffer.tobytes()).decode("utf-8")
-    return EventImage(
-        data=encoded,
-        mime_type="image/jpeg",
-        width=width,
-        height=height,
-    )
+class AliasResult(TypedDict, total=False):
+    detections: List[Detection]
+    summary: Summary
+    conclusion: Conclusion
+    image: EventImage
 
 
 def _resolve_meta(models_by_alias: Mapping[str, AliasModel]) -> tuple[str, str]:
@@ -156,7 +139,9 @@ def run_frame(
         }
 
         if detected:
-            alias_result["image"] = _encode_image(frame)
+            overlay = draw_detections(frame, detections, title=alias)
+            overlay_path = save_overlay(overlay, model.job_id, frame_idx, alias)
+            alias_result["image"] = EventImage(overlay_path=overlay_path)
 
         results[alias] = alias_result
 

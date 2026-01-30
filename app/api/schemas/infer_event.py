@@ -4,10 +4,7 @@ from pydantic import BaseModel, Field
 
 
 class EventImage(BaseModel):
-    data: str = Field(..., description="Base64-encoded image payload")
-    mime_type: str = Field("image/jpeg", description="Image MIME type")
-    width: int = Field(..., description="Image width")
-    height: int = Field(..., description="Image height")
+    overlay_path: str = Field(..., description="Overlay image path")
 
 
 class Detection(BaseModel):
