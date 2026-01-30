@@ -25,12 +25,14 @@ from app.schemas.train import (
     YoloTrainNewRequest,
     YoloTrainRequest,
 )
+from app.api.routes.infer import router as infer_router
 from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
 from app.services.yolo_presets import resolve_augment_params, supports_freeze_param
 from app.trainers.yolo_ultralytics import run_yolo_train
 
 app = FastAPI(title="ModelForge v1")
+app.include_router(infer_router)
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 MODEL_SPEC_WEIGHTS = {
