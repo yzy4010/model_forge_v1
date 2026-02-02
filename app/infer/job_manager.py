@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+import logging
 from threading import Lock
 from typing import Any, Dict, Optional
 from uuid import uuid4
@@ -9,6 +10,8 @@ from uuid import uuid4
 from fastapi import HTTPException
 
 from app.infer.job import InferenceJob
+
+logger = logging.getLogger("model_forge.infer.job_manager")
 
 
 @dataclass
@@ -48,12 +51,15 @@ class JobManager:
                 raise KeyError(job_id)
             if job.status in {"stopped", "failed"}:
                 return job.snapshot()
+            logger.warning("Stop requested job_id=%s status=%s", job_id, job.status)
             job.stop_event.set()
             job.status = "stopping"
             thread = job.thread
             sender = job.sender
         if thread is not None:
             thread.join(timeout=3.0)
+            alive = thread.is_alive()
+            logger.warning("Stop join job_id=%s thread_alive=%s", job_id, alive)
         if sender is not None:
             sender.stop(timeout_s=1.0)
         with self._lock:
