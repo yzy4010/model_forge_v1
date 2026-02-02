@@ -18,7 +18,6 @@ logger = logging.getLogger("model_forge.infer")
 class LoadedModel:
     alias: str
     model_id: str
-    model_name: str
     weights_path: Path
     yolo: YOLO
 
@@ -37,16 +36,13 @@ def _ensure_weights_available(weights_path: Path) -> None:
 
 
 def _resolve_alias(model: ScenarioModel) -> str:
-    alias = getattr(model, "alias", None)
-    if alias:
-        return alias
-    return model.model_name or model.model_id
+    return model.alias or model.model_id
 
 
 def load_models(models: List[ScenarioModel]) -> Dict[str, LoadedModel]:
     loaded: Dict[str, LoadedModel] = {}
     for model in models:
-        weights_path = Path(model.model_path)
+        weights_path = Path(model.weights_path)
         _ensure_weights_available(weights_path)
         with _CACHE_LOCK:
             yolo = _MODEL_CACHE.get(model.model_id)
@@ -64,7 +60,6 @@ def load_models(models: List[ScenarioModel]) -> Dict[str, LoadedModel]:
         loaded[alias] = LoadedModel(
             alias=alias,
             model_id=model.model_id,
-            model_name=model.model_name,
             weights_path=weights_path,
             yolo=yolo,
         )
