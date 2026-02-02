@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from datetime import datetime
 from threading import Thread
 from typing import Dict
@@ -117,6 +118,8 @@ def _run_job(
     job = job_manager.get_job(job_id)
     if job is None:
         return
+    t0 = time.time()
+    failed = False
     try:
         for frame_idx, ts_ms, frame in iter_rtsp_frames(
             rtsp_url,
@@ -139,13 +142,27 @@ def _run_job(
             sender.enqueue(event)
             job.frame_idx = frame_idx
     except Exception:
+        failed = True
         logger.exception("Inference job failed (job_id=%s)", job_id)
         _mark_job_failed(job)
     finally:
         sender.stop(timeout_s=1.0)
         if job.stop_event.is_set() or job.status == "stopping":
+            reason = "stopped"
             _mark_job_stopped(job)
-            logger.info("Inference job stopped (job_id=%s)", job_id)
+        elif failed:
+            reason = "failed"
+        else:
+            reason = "finished"
+        logger.info(
+            "InferenceJob exit job_id=%s scenario_id=%s reason=%s status=%s frames_done=%s elapsed_s=%.3f",
+            job_id,
+            job.scenario_id,
+            reason,
+            job.status,
+            job.frame_idx,
+            time.time() - t0,
+        )
 
 
 @router.post("/stream", response_model=InferStartResponse)
