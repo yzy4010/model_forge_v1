@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime
 from threading import Thread
 from typing import Dict
 from urllib.parse import urlparse
@@ -95,9 +96,14 @@ def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]
     return models_by_alias
 
 
-def _update_job_on_exit(job: InferenceJob | None) -> None:
-    if job and job.is_running():
-        job.stop()
+def _mark_job_stopped(job: InferenceJob) -> None:
+    job.status = "stopped"
+    job.stopped_at = datetime.utcnow()
+
+
+def _mark_job_failed(job: InferenceJob) -> None:
+    job.status = "failed"
+    job.failed_at = datetime.utcnow()
 
 
 def _run_job(
@@ -108,10 +114,16 @@ def _run_job(
     aliases: list[str],
     sender: WebhookSender,
 ) -> None:
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return
     try:
-        for frame_idx, ts_ms, frame in iter_rtsp_frames(rtsp_url, sample_fps):
-            job = job_manager.get_job(job_id)
-            if job is None or not job.is_running():
+        for frame_idx, ts_ms, frame in iter_rtsp_frames(
+            rtsp_url,
+            sample_fps,
+            stop_event=job.stop_event,
+        ):
+            if job.stop_event.is_set() or job.status != "running":
                 break
             event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
             try:
@@ -128,9 +140,12 @@ def _run_job(
             job.frame_idx = frame_idx
     except Exception:
         logger.exception("Inference job failed (job_id=%s)", job_id)
+        _mark_job_failed(job)
     finally:
         sender.stop(timeout_s=1.0)
-        _update_job_on_exit(job_manager.get_job(job_id))
+        if job.stop_event.is_set() or job.status == "stopping":
+            _mark_job_stopped(job)
+            logger.info("Inference job stopped (job_id=%s)", job_id)
 
 
 @router.post("/stream", response_model=InferStartResponse)
@@ -161,6 +176,10 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender),
         daemon=True,
     )
+    job = job_manager.get_job(job_id)
+    if job is not None:
+        job.thread = thread
+        job.sender = sender
     thread.start()
 
     return InferStartResponse(job_id=job_id, status="running")
@@ -168,7 +187,12 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
 
 @router.post("/{job_id}/stop")
 def stop_infer_stream(job_id: str) -> dict:
-    stopped = job_manager.stop_job(job_id)
-    if not stopped:
+    try:
+        snapshot = job_manager.stop_job(job_id)
+    except KeyError:
         raise HTTPException(status_code=404, detail="job not found")
-    return {"job_id": job_id, "status": "stopped"}
+    return {
+        "job_id": snapshot["job_id"],
+        "status": snapshot["status"],
+        "stopped_at": snapshot["stopped_at"],
+    }
