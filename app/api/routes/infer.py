@@ -9,7 +9,7 @@ from urllib.parse import urlparse
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas.infer import InferStartResponse, InferStreamRequest
-from app.infer.inferencer import AliasModel, run_frame
+from app.infer.inferencer import AliasModel, run_frame, validate_event
 from app.infer.job import InferenceJob
 from app.infer.job_manager import JobManager
 from app.infer.model_loader import load_models
@@ -61,6 +61,7 @@ def _resolve_webhook_url() -> str:
 def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
     loaded = load_models(req.scenario.models)
     params_by_alias = {model.alias: model.params for model in req.scenario.models}
+    model_id_by_alias = {model.alias: model.model_id for model in req.scenario.models}
     models_by_alias: Dict[str, AliasModel] = {}
     for alias, model in loaded.items():
         params = params_by_alias.get(alias)
@@ -69,12 +70,19 @@ def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]
                 status_code=400,
                 detail=f"Missing params for model alias '{alias}'",
             )
+        model_id = model_id_by_alias.get(alias)
+        if model_id is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing model_id for model alias '{alias}'",
+            )
         models_by_alias[alias] = AliasModel(
             yolo=model.yolo,
             conf=params.conf,
             iou=params.iou,
             imgsz=params.imgsz,
             max_det=params.max_det,
+            model_id=model_id,
             job_id=job_id,
             scenario_id=req.scenario.scenario_id,
         )
@@ -99,6 +107,16 @@ def _run_job(
             if job is None or not job.is_running():
                 break
             event = run_frame(models_by_alias, frame, ts_ms, frame_idx)
+            try:
+                validate_event(event)
+            except AssertionError as exc:
+                logger.warning(
+                    "Invalid inference event; dropped frame job_id=%s frame_idx=%s err=%s",
+                    job_id,
+                    frame_idx,
+                    exc,
+                )
+                continue
             sender.enqueue(event)
             job.frame_idx = frame_idx
     except Exception:
