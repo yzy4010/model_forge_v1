@@ -107,6 +107,19 @@ def _mark_job_failed(job: InferenceJob) -> None:
     job.failed_at = datetime.utcnow()
 
 
+def _fmt_alias_summary(results: dict, aliases: list) -> str:
+    parts = []
+    for alias in aliases:
+        result = results.get(alias, {}) or {}
+        conclusion = result.get("conclusion", {}) or {}
+        summary = result.get("summary", {}) or {}
+        detected = bool(conclusion.get("detected", False))
+        score = float(conclusion.get("score", 0.0) or 0.0)
+        num_det = int(summary.get("num_det", 0) or 0)
+        parts.append(f"{alias}:{'T' if detected else 'F'}({score:.2f},{num_det})")
+    return " ".join(parts)
+
+
 def _run_job(
     job_id: str,
     rtsp_url: str,
@@ -148,6 +161,16 @@ def _run_job(
                     exc,
                 )
                 continue
+            elapsed = time.time() - t0
+            qps = (frame_idx + 1) / elapsed if elapsed > 0 else 0.0
+            alias_summary = _fmt_alias_summary(event["results"], aliases)
+            logger.info(
+                "job=%s frame=%s qps~%.2f results={%s}",
+                job_id,
+                frame_idx,
+                qps,
+                alias_summary,
+            )
             sender.enqueue(event)
             job.frame_idx = frame_idx
             frames_done = frame_idx
