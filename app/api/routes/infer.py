@@ -20,20 +20,27 @@ router = APIRouter(prefix="/infer", tags=["infer"])
 
 job_manager = JobManager()
 
-DEFAULT_SAMPLE_FPS = 5.0
+DEFAULT_SAMPLE_FPS = 2.0
 DEFAULT_WEBHOOK_URL = "http://localhost:8001/webhook"
 
 
 def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
-    loaded = load_models([req.scenario.model])
+    loaded = load_models(req.scenario.models)
+    params_by_alias = {model.alias: model.params for model in req.scenario.models}
     models_by_alias: Dict[str, AliasModel] = {}
     for alias, model in loaded.items():
+        params = params_by_alias.get(alias)
+        if params is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing params for model alias '{alias}'",
+            )
         models_by_alias[alias] = AliasModel(
             yolo=model.yolo,
-            conf=req.params.conf,
-            iou=req.params.iou,
-            imgsz=req.params.imgsz,
-            max_det=req.params.max_det,
+            conf=params.conf,
+            iou=params.iou,
+            imgsz=params.imgsz,
+            max_det=params.max_det,
             job_id=job_id,
             scenario_id=req.scenario.scenario_id,
         )
@@ -69,20 +76,19 @@ def _run_job(
 
 @router.post("/stream", response_model=InferStartResponse)
 def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
-    if not req.stream_url:
-        raise HTTPException(status_code=400, detail="stream_url is required")
+    if not req.rtsp_url:
+        raise HTTPException(status_code=400, detail="rtsp_url is required")
 
     job_id = job_manager.start_job(
         {
             "scenario_id": req.scenario.scenario_id,
-            "rtsp_url": req.stream_url,
+            "rtsp_url": req.rtsp_url,
             "sample_fps": req.sample_fps,
         }
     )
     try:
         models_by_alias = _build_models(req, job_id)
-        webhook_url = req.webhook_url or DEFAULT_WEBHOOK_URL
-        sender = WebhookSender(webhook_url)
+        sender = WebhookSender(DEFAULT_WEBHOOK_URL)
     except Exception:
         job_manager.stop_job(job_id)
         raise
@@ -90,7 +96,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.stream_url, sample_fps, models_by_alias, sender),
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, sender),
         daemon=True,
     )
     thread.start()
