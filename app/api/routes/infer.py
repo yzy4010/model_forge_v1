@@ -163,9 +163,9 @@ def _run_job(
                 continue
             elapsed = time.time() - t0
             qps = (frame_idx + 1) / elapsed if elapsed > 0 else 0.0
-            alias_summary = _fmt_alias_summary(event["results"], aliases)
-            logger.info(
-                "job=%s frame=%s qps~%.2f results={%s}",
+            alias_summary = _fmt_alias_summary(event.get("results", {}), aliases)
+            logger.warning(
+                "MF_FRAME_SUMMARY job=%s frame=%s qps~%.2f results={%s}",
                 job_id,
                 frame_idx,
                 qps,
