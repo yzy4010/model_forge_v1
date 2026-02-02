@@ -23,14 +23,11 @@ router = APIRouter(prefix="/infer", tags=["infer"])
 job_manager = JobManager()
 
 DEFAULT_SAMPLE_FPS = 2.0
-DEFAULT_WEBHOOK_URL = "http://localhost:8001/webhook"
-FALLBACK_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"
+DEFAULT_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"
 
 
 def _resolve_webhook_url() -> str:
-    webhook_url = DEFAULT_WEBHOOK_URL
-    if os.getenv("MODEL_FORGE_WEBHOOK_FALLBACK_LOCAL") == "1":
-        webhook_url = FALLBACK_WEBHOOK_URL
+    webhook_url = os.getenv("MODEL_FORGE_WEBHOOK_URL", DEFAULT_WEBHOOK_URL)
     if not webhook_url or not (
         webhook_url.startswith("http://") or webhook_url.startswith("https://")
     ):
@@ -45,8 +42,18 @@ def _resolve_webhook_url() -> str:
             detail="webhook_url host cannot be 0.0.0.0",
         )
     if parsed.hostname == "localhost":
+        userinfo = ""
+        if parsed.username:
+            userinfo = parsed.username
+            if parsed.password:
+                userinfo = f"{userinfo}:{parsed.password}"
+            userinfo = f"{userinfo}@"
+        port = f":{parsed.port}" if parsed.port else ""
+        normalized_netloc = f"{userinfo}127.0.0.1{port}"
+        webhook_url = parsed._replace(netloc=normalized_netloc).geturl()
         logger.warning(
-            "WEBHOOK_URL_HOST_LOCALHOST detected; consider using 127.0.0.1"
+            "WEBHOOK_URL_HOST_LOCALHOST normalized to 127.0.0.1 for webhook_url=%s",
+            webhook_url,
         )
     return webhook_url
 
