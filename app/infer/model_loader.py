@@ -30,18 +30,22 @@ def _ensure_weights_available(weights_path: Path) -> None:
     if weights_path.exists():
         return
     raise HTTPException(
-        status_code=404,
+        status_code=400,
         detail=f"Model weights not found at {weights_path}",
     )
 
 
-def _resolve_alias(model: ScenarioModel) -> str:
-    return model.alias or model.model_id
-
-
 def load_models(models: List[ScenarioModel]) -> Dict[str, LoadedModel]:
     loaded: Dict[str, LoadedModel] = {}
+    seen_aliases: set[str] = set()
     for model in models:
+        alias = model.alias
+        if alias in seen_aliases:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Duplicate model alias '{alias}'",
+            )
+        seen_aliases.add(alias)
         weights_path = Path(model.weights_path)
         _ensure_weights_available(weights_path)
         with _CACHE_LOCK:
@@ -56,7 +60,6 @@ def load_models(models: List[ScenarioModel]) -> Dict[str, LoadedModel]:
                 _MODEL_CACHE[model.model_id] = yolo
             else:
                 logger.info("Model cache hit for model_id=%s", model.model_id)
-        alias = _resolve_alias(model)
         loaded[alias] = LoadedModel(
             alias=alias,
             model_id=model.model_id,
