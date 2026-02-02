@@ -145,6 +145,7 @@ def validate_event(event: Mapping[str, Any]) -> None:
 
 def run_frame(
     models_by_alias: Mapping[str, AliasModel],
+    aliases: List[str],
     frame: Any,
     ts_ms: int,
     frame_idx: int,
@@ -152,7 +153,10 @@ def run_frame(
     job_id, scenario_id = _resolve_meta(models_by_alias)
     results: Dict[str, AliasResult] = {}
 
-    for alias, model in models_by_alias.items():
+    for alias in aliases:
+        model = models_by_alias.get(alias)
+        if model is None:
+            raise ValueError(f"Missing model for alias '{alias}'")
         prediction = model.yolo.predict(
             frame,
             conf=model.conf,
@@ -169,7 +173,7 @@ def run_frame(
 
         num_det = len(detections)
         top_conf = max((det["conf"] for det in detections), default=0.0)
-        detected = num_det > 0 and top_conf >= model.conf
+        detected = top_conf >= model.conf
 
         if not detected:
             detections = []

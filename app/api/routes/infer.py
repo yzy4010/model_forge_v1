@@ -63,7 +63,13 @@ def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]
     params_by_alias = {model.alias: model.params for model in req.scenario.models}
     model_id_by_alias = {model.alias: model.model_id for model in req.scenario.models}
     models_by_alias: Dict[str, AliasModel] = {}
-    for alias, model in loaded.items():
+    for alias in [model.alias for model in req.scenario.models]:
+        model = loaded.get(alias)
+        if model is None:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Missing model config for alias '{alias}'",
+            )
         params = params_by_alias.get(alias)
         if params is None:
             raise HTTPException(
@@ -99,6 +105,7 @@ def _run_job(
     rtsp_url: str,
     sample_fps: float,
     models_by_alias: Dict[str, AliasModel],
+    aliases: list[str],
     sender: WebhookSender,
 ) -> None:
     try:
@@ -106,7 +113,7 @@ def _run_job(
             job = job_manager.get_job(job_id)
             if job is None or not job.is_running():
                 break
-            event = run_frame(models_by_alias, frame, ts_ms, frame_idx)
+            event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
             try:
                 validate_event(event)
             except AssertionError as exc:
@@ -140,6 +147,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     )
     try:
         models_by_alias = _build_models(req, job_id)
+        aliases = [model.alias for model in req.scenario.models]
         webhook_url = _resolve_webhook_url()
         logger.warning("WEBHOOK_URL_USED=%s", webhook_url)
         sender = WebhookSender(webhook_url)
@@ -150,7 +158,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, sender),
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender),
         daemon=True,
     )
     thread.start()
