@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import logging
+import os
 from threading import Thread
 from typing import Dict
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, HTTPException
 
@@ -22,6 +24,31 @@ job_manager = JobManager()
 
 DEFAULT_SAMPLE_FPS = 2.0
 DEFAULT_WEBHOOK_URL = "http://localhost:8001/webhook"
+FALLBACK_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"
+
+
+def _resolve_webhook_url() -> str:
+    webhook_url = DEFAULT_WEBHOOK_URL
+    if os.getenv("MODEL_FORGE_WEBHOOK_FALLBACK_LOCAL") == "1":
+        webhook_url = FALLBACK_WEBHOOK_URL
+    if not webhook_url or not (
+        webhook_url.startswith("http://") or webhook_url.startswith("https://")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="webhook_url must start with http:// or https://",
+        )
+    parsed = urlparse(webhook_url)
+    if parsed.hostname == "0.0.0.0":
+        raise HTTPException(
+            status_code=400,
+            detail="webhook_url host cannot be 0.0.0.0",
+        )
+    if parsed.hostname == "localhost":
+        logger.warning(
+            "WEBHOOK_URL_HOST_LOCALHOST detected; consider using 127.0.0.1"
+        )
+    return webhook_url
 
 
 def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
@@ -88,7 +115,9 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     )
     try:
         models_by_alias = _build_models(req, job_id)
-        sender = WebhookSender(DEFAULT_WEBHOOK_URL)
+        webhook_url = _resolve_webhook_url()
+        logger.warning("WEBHOOK_URL_USED=%s", webhook_url)
+        sender = WebhookSender(webhook_url)
     except Exception:
         job_manager.stop_job(job_id)
         raise
