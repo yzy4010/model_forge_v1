@@ -4,13 +4,14 @@ import json
 import logging
 import threading
 import time
-import urllib.error
-import urllib.request
 from collections import deque
 from typing import Any, Deque, Dict, Optional
 
+import requests
+
 logger = logging.getLogger("model_forge.infer.push")
 SLOW_REQUEST_MS = 500
+CONNECT_TIMEOUT_S = 2.0
 
 
 class WebhookSender:
@@ -38,7 +39,8 @@ class WebhookSender:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._stop_event = threading.Event()
-        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        self._session = requests.Session()
+        self._session.trust_env = False
         self._thread = threading.Thread(target=self._send_loop, daemon=True)
         self._thread.start()
         logger.info(
@@ -46,6 +48,10 @@ class WebhookSender:
             self._url,
             self._timeout_s,
             self._max_queue,
+        )
+        logger.info(
+            "WebhookSender http client=requests trust_env=%s",
+            self._session.trust_env,
         )
 
     @property
@@ -109,45 +115,45 @@ class WebhookSender:
 
     def _post_payload(self, payload: str) -> None:
         t0 = time.time()
-        request = urllib.request.Request(
-            self._url,
-            data=payload.encode("utf-8"),
-            headers=self._headers,
-            method="POST",
-        )
         try:
-            with self._opener.open(request, timeout=self._timeout_s) as response:
-                status_code = response.getcode()
-                lat_ms = int((time.time() - t0) * 1000)
-                if 200 <= status_code < 300:
-                    with self._lock:
-                        self._sent_count += 1
-                        self._last_error = None
-                        self._last_latency_ms = lat_ms
-                    logger.info("WebhookSender delivered event (status=%s)", status_code)
-                else:
-                    with self._lock:
-                        self._failed_count += 1
-                        self._last_error = f"status={status_code}"
-                        self._last_latency_ms = lat_ms
-                    logger.warning(
-                        "WebhookSender delivered non-2xx status=%s (lat_ms=%s)",
-                        status_code,
-                        lat_ms,
-                    )
+            resp = self._session.post(
+                self._url,
+                data=payload.encode("utf-8"),
+                headers=self._headers,
+                timeout=(CONNECT_TIMEOUT_S, self._timeout_s),
+            )
+            status_code = resp.status_code
+            lat_ms = int((time.time() - t0) * 1000)
+            if 200 <= status_code < 300:
+                with self._lock:
+                    self._sent_count += 1
+                    self._last_latency_ms = lat_ms
+                    self._last_error = None
                 if lat_ms >= SLOW_REQUEST_MS:
                     logger.warning(
-                        "WebhookSender slow delivery (lat_ms=%s, status=%s)",
+                        "WebhookSender slow delivery lat_ms=%s status=%s queue=%s",
                         lat_ms,
                         status_code,
+                        self._queue_len(),
                     )
-        except urllib.error.URLError as exc:
+            else:
+                with self._lock:
+                    self._failed_count += 1
+                    self._last_latency_ms = lat_ms
+                    self._last_error = f"non-2xx {status_code}"
+                logger.warning(
+                    "WebhookSender non-2xx status=%s lat_ms=%s queue=%s",
+                    status_code,
+                    lat_ms,
+                    self._queue_len(),
+                )
+        except requests.exceptions.RequestException as exc:
             lat_ms = int((time.time() - t0) * 1000)
             with self._lock:
                 self._failed_count += 1
                 self._last_error = repr(exc)
                 self._last_latency_ms = lat_ms
-                queue_len = len(self._queue)
+                queue_len = self._queue_len_unsafe()
                 dropped_count = self._dropped_count
                 failed_count = self._failed_count
             logger.warning(
@@ -160,20 +166,10 @@ class WebhookSender:
                 self._timeout_s,
             )
             time.sleep(0.05)
-        except Exception as exc:
-            lat_ms = int((time.time() - t0) * 1000)
-            with self._lock:
-                self._failed_count += 1
-                self._last_error = repr(exc)
-                self._last_latency_ms = lat_ms
-                queue_len = len(self._queue)
-                dropped_count = self._dropped_count
-                failed_count = self._failed_count
-            logger.exception(
-                "WebhookSender unexpected failure during delivery (lat_ms=%s, queue=%s, dropped=%s, failed=%s)",
-                lat_ms,
-                queue_len,
-                dropped_count,
-                failed_count,
-            )
-            time.sleep(0.1)
+
+    def _queue_len_unsafe(self) -> int:
+        return len(self._queue)
+
+    def _queue_len(self) -> int:
+        with self._lock:
+            return self._queue_len_unsafe()
