@@ -119,6 +119,8 @@ def _run_job(
     if job is None:
         return
     t0 = time.time()
+    logger.warning("Runner start job_id=%s scenario_id=%s", job_id, job.scenario_id)
+    frames_done = 0
     failed = False
     try:
         for frame_idx, ts_ms, frame in iter_rtsp_frames(
@@ -126,7 +128,14 @@ def _run_job(
             sample_fps,
             stop_event=job.stop_event,
         ):
-            if job.stop_event.is_set() or job.status != "running":
+            if job.stop_event.is_set():
+                logger.warning(
+                    "Runner stop_event set; breaking loop job_id=%s frame=%s",
+                    job_id,
+                    frame_idx,
+                )
+                break
+            if job.status != "running":
                 break
             event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
             try:
@@ -141,27 +150,24 @@ def _run_job(
                 continue
             sender.enqueue(event)
             job.frame_idx = frame_idx
+            frames_done = frame_idx
     except Exception:
         failed = True
-        logger.exception("Inference job failed (job_id=%s)", job_id)
+        logger.exception("Runner failed job_id=%s", job_id)
         _mark_job_failed(job)
     finally:
         sender.stop(timeout_s=1.0)
         if job.stop_event.is_set() or job.status == "stopping":
-            reason = "stopped"
             _mark_job_stopped(job)
-        elif failed:
-            reason = "failed"
-        else:
-            reason = "finished"
-        logger.info(
-            "InferenceJob exit job_id=%s scenario_id=%s reason=%s status=%s frames_done=%s elapsed_s=%.3f",
+        reason = "stopped" if job.stop_event.is_set() else "finished"
+        elapsed = time.time() - t0
+        logger.warning(
+            "Runner exit job_id=%s scenario_id=%s reason=%s frames_done=%s elapsed_s=%.3f",
             job_id,
             job.scenario_id,
             reason,
-            job.status,
-            job.frame_idx,
-            time.time() - t0,
+            frames_done,
+            elapsed,
         )
 
 
