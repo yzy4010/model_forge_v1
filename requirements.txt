@@ -4,3 +4,4 @@ pydantic
 clearml
 ultralytics
 pyyaml
+requests>=2.31
