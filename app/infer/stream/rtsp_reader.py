@@ -2,11 +2,17 @@ from __future__ import annotations
 
 import time
 from collections.abc import Generator
+from threading import Event
+from typing import Optional
 
 import cv2
 
 
-def iter_rtsp_frames(rtsp_url: str, sample_fps: float) -> Generator[tuple[int, int, "cv2.Mat"], None, None]:
+def iter_rtsp_frames(
+    rtsp_url: str,
+    sample_fps: float,
+    stop_event: Optional[Event] = None,
+) -> Generator[tuple[int, int, "cv2.Mat"], None, None]:
     """Yield frames from an RTSP stream at a target sample rate.
 
     Sampling is based on wall clock time. Frames are dropped if reading is slow
@@ -25,6 +31,8 @@ def iter_rtsp_frames(rtsp_url: str, sample_fps: float) -> Generator[tuple[int, i
 
     try:
         while True:
+            if stop_event is not None and stop_event.is_set():
+                break
             ok, frame = cap.read()
             if not ok:
                 raise RuntimeError("Failed to read frame from RTSP stream")

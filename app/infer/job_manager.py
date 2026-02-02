@@ -41,13 +41,28 @@ class JobManager:
             )
             return job_id
 
-    def stop_job(self, job_id: str) -> bool:
+    def stop_job(self, job_id: str) -> Dict[str, Any]:
         with self._lock:
             job = self._jobs.get(job_id)
             if job is None:
-                return False
-            job.stop()
-            return True
+                raise KeyError(job_id)
+            if job.status in {"stopped", "failed"}:
+                return job.snapshot()
+            job.stop_event.set()
+            job.status = "stopping"
+            thread = job.thread
+            sender = job.sender
+        if thread is not None:
+            thread.join(timeout=3.0)
+        if sender is not None:
+            sender.stop(timeout_s=1.0)
+        with self._lock:
+            job = self._jobs.get(job_id)
+            if job is None:
+                raise KeyError(job_id)
+            job.status = "stopped"
+            job.stopped_at = datetime.utcnow()
+            return job.snapshot()
 
     def get_job(self, job_id: str) -> Optional[InferenceJob]:
         with self._lock:
