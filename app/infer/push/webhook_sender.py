@@ -38,8 +38,15 @@ class WebhookSender:
         self._lock = threading.Lock()
         self._condition = threading.Condition(self._lock)
         self._stop_event = threading.Event()
+        self._opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
         self._thread = threading.Thread(target=self._send_loop, daemon=True)
         self._thread.start()
+        logger.info(
+            "WebhookSender init url=%s timeout_s=%.2f max_queue=%s",
+            self._url,
+            self._timeout_s,
+            self._max_queue,
+        )
 
     @property
     def dropped_count(self) -> int:
@@ -109,7 +116,7 @@ class WebhookSender:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=self._timeout_s) as response:
+            with self._opener.open(request, timeout=self._timeout_s) as response:
                 status_code = response.getcode()
                 lat_ms = int((time.time() - t0) * 1000)
                 if 200 <= status_code < 300:
