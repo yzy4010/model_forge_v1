@@ -44,6 +44,26 @@ python -m uvicorn app.main:app --reload
 
 ---
 
+## 推理预览（MJPEG）
+
+1) 启动推理获取 job_id：
+
+```bash
+curl -s -X POST "http://127.0.0.1:8000/infer/stream" \
+  -H "Content-Type: application/json" \
+  -d @payload.json
+```
+
+2) 浏览器打开预览流：
+
+```
+http://127.0.0.1:8000/preview/<JOB_ID>
+```
+
+推理停止后预览会发送最后一帧并结束连接。
+
+---
+
 ## 支持的 model_spec
 
 - yolov8n / yolov8s / yolov8m

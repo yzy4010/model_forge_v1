@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from threading import Event, Thread
+from threading import Event, Lock, Thread
 from typing import Optional, TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
@@ -23,6 +23,9 @@ class InferenceJob:
     sender: Optional["WebhookSender"] = None
     stopped_at: Optional[datetime] = None
     failed_at: Optional[datetime] = None
+    latest_frame_bgr: Optional[Any] = None
+    latest_frame_ts_ms: int = 0
+    frame_lock: Lock = field(default_factory=Lock)
 
     def stop(self) -> None:
         self.stop_event.set()
