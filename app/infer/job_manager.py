@@ -55,11 +55,16 @@ class JobManager:
             job.stop_event.set()
             job.status = "stopping"
             thread = job.thread
+            grabber_thread = job.grabber_thread
             sender = job.sender
         if thread is not None:
             thread.join(timeout=3.0)
             alive = thread.is_alive()
             logger.warning("Stop join job_id=%s thread_alive=%s", job_id, alive)
+        if grabber_thread is not None:
+            grabber_thread.join(timeout=2.0)
+            alive = grabber_thread.is_alive()
+            logger.warning("Stop join job_id=%s grabber_alive=%s", job_id, alive)
         if sender is not None:
             sender.stop(timeout_s=1.0)
         with self._lock:
