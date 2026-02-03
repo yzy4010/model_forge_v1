@@ -7,6 +7,7 @@ from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.infer.job_registry import job_manager
+from app.infer.visualize import draw_alias_detections
 
 router = APIRouter(tags=["preview"])
 
@@ -24,19 +25,30 @@ def preview(job_id: str) -> StreamingResponse:
             if job.stop_event.is_set() and last_sent_after_stop:
                 break
 
-            with job.frame_lock:
-                frame = None if job.latest_frame_bgr is None else job.latest_frame_bgr.copy()
+            with job.raw_lock:
+                frame = (
+                    None
+                    if job.latest_raw_frame_bgr is None
+                    else job.latest_raw_frame_bgr.copy()
+                )
 
             if frame is None:
                 if job.stop_event.is_set():
                     break
                 time.sleep(0.05)
                 continue
+            with job.res_lock:
+                results = {} if job.latest_results is None else dict(job.latest_results)
+            frame = draw_alias_detections(frame, results)
+            height, width = frame.shape[:2]
+            if width > 960:
+                scale = 960 / width
+                frame = cv2.resize(frame, (960, int(height * scale)))
 
             ok, jpg = cv2.imencode(
                 ".jpg",
                 frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 80],
+                [int(cv2.IMWRITE_JPEG_QUALITY), 70],
             )
             if not ok:
                 time.sleep(0.05)
@@ -44,7 +56,7 @@ def preview(job_id: str) -> StreamingResponse:
 
             yield boundary
             yield b"Content-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
-            time.sleep(0.05)
+            time.sleep(0.1)
 
             if job.stop_event.is_set():
                 last_sent_after_stop = True
