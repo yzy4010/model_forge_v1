@@ -13,16 +13,15 @@ from fastapi import APIRouter, HTTPException
 from app.api.schemas.infer import InferStartResponse, InferStreamRequest
 from app.infer.inferencer import AliasModel, run_frame, validate_event
 from app.infer.job import InferenceJob
-from app.infer.job_manager import JobManager
+from app.infer.job_registry import job_manager
 from app.infer.model_loader import load_models
 from app.infer.push import WebhookSender
 from app.infer.stream.rtsp_reader import iter_rtsp_frames
+from app.infer.visualize import draw_alias_detections
 
 logger = logging.getLogger("model_forge.infer.routes")
 
 router = APIRouter(prefix="/infer", tags=["infer"])
-
-job_manager = JobManager()
 
 DEFAULT_SAMPLE_FPS = 2.0
 DEFAULT_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"
@@ -151,6 +150,10 @@ def _run_job(
             if job.status != "running":
                 break
             event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
+            overlay = draw_alias_detections(frame, event.get("results", {}))
+            with job.frame_lock:
+                job.latest_frame_bgr = overlay
+                job.latest_frame_ts_ms = ts_ms
             try:
                 validate_event(event)
             except AssertionError as exc:
