@@ -191,7 +191,7 @@ def run_frame(
         }
 
         if detected:
-            overlay = draw_detections(frame, detections, title=alias)
+            overlay = draw_detections(frame, detections,alias,title=alias)
             overlay_path = save_overlay(overlay, model.job_id, frame_idx, alias)
             alias_result["image"] = EventImage(
                 type="file",
