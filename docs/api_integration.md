@@ -18,7 +18,7 @@
 
 ## 接口列表
 
-> 仅包含 6 个业务接口：
+> 仅包含 9 个业务接口：
 
 - `POST /datasets/register_local`
 - `GET /datasets/{dataset_id}`
@@ -26,6 +26,9 @@
 - `POST /train/yolo/continue`
 - `GET /train/{job_id}/progress`
 - `GET /train/{job_id}/result`
+- `POST /infer/stream`
+- `POST /infer/{job_id}/stop`
+- `GET /preview/{job_id}`
 
 ---
 
@@ -768,3 +771,212 @@
 
 1. `training not finished`：需等待任务完成。
 2. `meta.json not found` / `meta.json invalid`：训练产出异常或文件损坏，建议重新训练。
+
+---
+
+## POST /infer/stream
+
+**功能说明**：启动一个实时推理流，从RTSP URL读取视频流并使用指定模型进行推理。
+
+### Request
+
+- **Content-Type**：`application/json`
+
+**请求体 JSON 示例**
+
+```json
+{
+  "rtsp_url": "rtsp://example.com:554/stream1",
+  "sample_fps": 2.0,
+  "scenario": {
+    "scenario_id": "traffic_monitoring",
+    "models": [
+      {
+        "alias": "vehicle_detector",
+        "model_id": "yolov8s_vehicles",
+        "weights_path": "/path/to/weights/vehicle_detector.pt",
+        "labels": ["car", "truck", "bus"],
+        "params": {
+          "conf": 0.3,
+          "iou": 0.5,
+          "imgsz": 640,
+          "max_det": 100
+        }
+      },
+      {
+        "alias": "person_detector",
+        "model_id": "yolov8s_persons",
+        "weights_path": "/path/to/weights/person_detector.pt",
+        "labels": ["person"],
+        "params": {
+          "conf": 0.25,
+          "iou": 0.45,
+          "imgsz": 640,
+          "max_det": 50
+        }
+      }
+    ]
+  }
+}
+```
+
+**逐字段注解**
+
+| 字段 | 类型 | 必选 | 默认值 | 描述 |
+|------|------|------|--------|------|
+| `rtsp_url` | string | 是 | - | RTSP流URL地址 |
+| `sample_fps` | number | 否 | 2.0 | 视频流采样帧率 |
+| `scenario` | object | 是 | - | 推理场景配置 |
+| `scenario.scenario_id` | string | 是 | - | 场景唯一标识符 |
+| `scenario.models` | array | 是 | - | 场景中使用的模型列表 |
+| `scenario.models[].alias` | string | 是 | - | 模型别名 |
+| `scenario.models[].model_id` | string | 是 | - | 模型唯一标识符 |
+| `scenario.models[].weights_path` | string | 是 | - | 模型权重文件路径 |
+| `scenario.models[].labels` | array | 否 | null | 模型输出标签列表 |
+| `scenario.models[].params` | object | 是 | - | 推理参数配置 |
+| `scenario.models[].params.conf` | number | 否 | 0.25 | 置信度阈值 |
+| `scenario.models[].params.iou` | number | 否 | 0.45 | IoU阈值 |
+| `scenario.models[].params.imgsz` | integer | 否 | 640 | 推理图像大小 |
+| `scenario.models[].params.max_det` | integer | 否 | 50 | 每帧最大检测数 |
+
+### Response
+
+**成功返回 JSON 示例**
+
+```json
+{
+  "job_id": "a1b2c3d4e5f6",
+  "status": "running"
+}
+```
+
+**逐字段注解**
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `job_id` | string | 推理作业唯一标识符 |
+| `status` | string | 作业启动状态，固定为 "running" |
+
+**处理流程**
+
+1. **参数验证**：检查 `rtsp_url` 是否提供
+2. **作业创建**：调用 `job_manager.start_job()` 创建新作业
+3. **模型构建**：调用 `_build_models()` 加载并配置指定的模型
+4. **Webhook配置**：解析并验证 webhook URL
+5. **线程启动**：
+   - 创建并启动帧抓取线程 (`_frame_grabber_loop`)，从RTSP URL读取视频流
+   - 创建并启动推理线程 (`_run_job`)，对抓取的帧进行模型推理
+6. **结果返回**：返回作业ID和启动状态
+
+**常见错误与排查**
+
+| 错误状态码 | 错误信息 | 描述 |
+|------------|----------|------|
+| 400 | "rtsp_url is required" | 未提供 RTSP 流 URL |
+| 400 | "Missing model config for alias '{alias}'" | 模型配置缺失 |
+| 400 | "Missing params for model alias '{alias}'" | 模型参数缺失 |
+| 400 | "Missing model_id for model alias '{alias}'" | 模型ID缺失 |
+| 400 | "webhook_url must start with http:// or https://" | Webhook URL 格式不正确 |
+| 400 | "webhook_url host cannot be 0.0.0.0" | Webhook URL 主机不能是 0.0.0.0 |
+
+**注意事项**
+
+1. 接口启动后会创建两个后台线程：
+   - 帧抓取线程：持续从 RTSP URL 读取视频帧
+   - 推理线程：对抓取的帧进行模型推理并发送结果
+
+2. 推理结果会通过配置的 Webhook URL 发送回调
+
+3. 可以通过 `/infer/{job_id}/stop` 接口停止正在运行的推理作业
+
+4. 采样帧率 (`sample_fps`) 应设置为正数，建议根据硬件性能和网络带宽调整
+
+5. 模型权重文件路径 (`weights_path`) 必须是系统可访问的有效路径
+
+---
+
+## POST /infer/{job_id}/stop
+
+**功能说明**：停止指定的推理作业。
+
+### Request
+
+- **Content-Type**：无（POST 请求）
+
+### Response
+
+**成功返回 JSON 示例**
+
+```json
+{
+  "job_id": "a1b2c3d4e5f6",
+  "status": "stopped",
+  "stopped_at": "2024-05-10T12:45:12Z"
+}
+```
+
+**逐字段注解**
+
+| 字段 | 类型 | 描述 |
+|------|------|------|
+| `job_id` | string | 推理作业唯一标识符 |
+| `status` | string | 作业停止状态，固定为 "stopped" |
+| `stopped_at` | string | 作业停止时间（UTC），ISO 8601 格式 |
+
+**处理流程**
+
+1. **参数验证**：检查 `job_id` 是否存在
+2. **作业停止**：调用 `job_manager.stop_job()` 停止指定作业
+3. **结果返回**：返回作业 ID、停止状态和停止时间
+
+**常见错误与排查**
+
+| 错误状态码 | 错误信息 | 描述 |
+|------------|----------|------|
+| 404 | "job not found" | 作业 ID 不存在 |
+
+**典型调用流程中的位置**：当需要停止正在运行的推理作业时调用此接口。
+
+---
+
+## GET /preview/{job_id}
+
+**功能说明**：获取推理作业的实时视频预览流，包含检测结果的可视化，复制接口使用浏览器打开，查看推理视频。
+
+### Request
+
+- **Content-Type**：无（GET 请求）
+
+### Response
+
+**成功返回**：
+- **Content-Type**：`multipart/x-mixed-replace; boundary=frame`
+- **响应体**：流式视频帧，每一帧为 JPEG 格式，包含检测结果的可视化叠加
+
+**处理流程**
+
+1. **参数验证**：检查 `job_id` 是否存在
+2. **作业获取**：调用 `job_manager.get_job()` 获取作业实例
+3. **流生成**：创建流式响应生成器，持续获取最新帧并添加检测结果可视化
+4. **帧处理**：
+   - 获取最新原始帧
+   - 获取最新检测结果
+   - 绘制检测结果到帧上
+   - 调整帧大小（宽度超过 960 时缩放）
+   - 编码为 JPEG 格式
+   - 作为流式响应返回
+5. **流控制**：当作业停止时，停止流传输
+
+**常见错误与排查**
+
+| 错误状态码 | 错误信息 | 描述 |
+|------------|----------|------|
+| 404 | "job not found" | 作业 ID 不存在 |
+
+**典型调用流程中的位置**：启动推理作业后，通过此接口查看实时推理结果的可视化预览。
+
+**注意事项**
+
+1. 此接口返回的是流式响应，需要客户端支持 `multipart/x-mixed-replace` 格式
+2. 视频流会在作业停止时自动终止
+3. 为了优化传输性能，帧宽度超过 960 时会自动缩放
