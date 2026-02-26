@@ -10,6 +10,8 @@ import shutil
 import sys
 import threading
 import time
+import requests
+from requests.exceptions import RequestException
 
 # 禁用 Ultralytics 自带的 ClearML 回调，避免与我们平台的 ClearML Task 冲突
 try:
@@ -69,12 +71,16 @@ class MetricsWatcher(threading.Thread):
         self,
         project_dir: Path,
         logs_dir: Path,
+        job_id: str,
+        java_api_url: str = "http://localhost:8080/api/train/metrics",
         poll_interval: float = 1.5,
         resume_dir: Optional[Path] = None,
     ) -> None:
         super().__init__(daemon=True)
         self._project_dir = project_dir
         self._logs_dir = logs_dir
+        self._job_id = job_id
+        self._java_api_url = java_api_url
         self._poll_interval = poll_interval
         self._resume_dir = resume_dir
         self._stop_event = threading.Event()
@@ -97,9 +103,39 @@ class MetricsWatcher(threading.Thread):
                         payload["ts"] = utc_now_iso()
                         with metrics_path.open("a", encoding="utf-8") as handle:
                             handle.write(json.dumps(payload, ensure_ascii=False) + "\n")
+                        # 调用 Java 接口回传训练日志
+                        self._send_metrics_to_java(payload)
                         if epoch is not None:
                             self._last_epoch = epoch
             time.sleep(self._poll_interval)
+    
+    def _send_metrics_to_java(self, metrics: Dict[str, Any]) -> None:
+        try:
+            # 构建符合要求的 JSON 格式
+            java_payload = {
+                "job_id": self._job_id,
+                "epoch": metrics.get("epoch"),
+                "box_loss": metrics.get("box_loss", metrics.get("train/box_loss", metrics.get("val/box_loss"))),
+                "cls_loss": metrics.get("cls_loss", metrics.get("train/cls_loss", metrics.get("val/cls_loss"))),
+                "dfl_loss": metrics.get("dfl_loss", metrics.get("train/dfl_loss", metrics.get("val/dfl_loss"))),
+                "precision": metrics.get("precision", metrics.get("metrics/precision(B)")),
+                "recall": metrics.get("recall", metrics.get("metrics/recall(B)")),
+                "map50": metrics.get("map50", metrics.get("metrics/mAP50", metrics.get("metrics/mAP50(B)"))),
+                "map50_95": metrics.get("map50_95", metrics.get("map50-95", metrics.get("metrics/mAP50-95", metrics.get("metrics/mAP50-95(B)"))))
+            }
+            # 移除值为 None 的字段
+            java_payload = {k: v for k, v in java_payload.items() if v is not None}
+            
+            response = requests.post(
+                self._java_api_url,
+                json=java_payload,
+                timeout=5
+            )
+            response.raise_for_status()
+            logging.info(f"Successfully sent metrics to Java API for job {self._job_id}, epoch {metrics.get('epoch')}")
+        except RequestException as e:
+            # 仅记录错误，不中断训练
+            logging.warning(f"Failed to send metrics to Java API: {e}")
 
     def _resolve_run_dir(self) -> Path:
         if self._resume_dir and self._resume_dir.exists():
@@ -183,6 +219,8 @@ def run_yolo_train(
     hyperparams: Dict[str, Any],
     device: str,
     train_mode: str,
+    job_id: str,
+    java_api_url: str = "http://localhost:8080/api/train/metrics",
     resume_from: Optional[str] = None,
 ) -> Dict[str, Any]:
     job_root = outputs_dir.resolve()
@@ -212,7 +250,7 @@ def run_yolo_train(
         **hyperparams,
     }
 
-    metrics_watcher = MetricsWatcher(project_dir, logs_dir, resume_dir=resume_dir)
+    metrics_watcher = MetricsWatcher(project_dir, logs_dir, job_id, java_api_url, resume_dir=resume_dir)
     metrics_watcher.start()
     logger = logging.getLogger("model_forge.train")
     with train_log_path.open("a", encoding="utf-8") as log_handle:

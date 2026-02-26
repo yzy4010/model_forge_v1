@@ -605,6 +605,7 @@ def _run_yolo_job(
             hyperparams=hyperparams,
             device=device,
             train_mode=request.train_mode,
+            job_id=job_id,
             resume_from=request.resume_from,
         )
         finished_at = utc_now_iso()
