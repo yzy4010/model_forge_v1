@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from threading import Lock
+from threading import Lock, Thread, Event
 from typing import Any, Dict, Optional
 
 
@@ -13,6 +13,8 @@ class JobRecord:
     status: str
     error: Optional[str] = None
     result: Optional[Dict[str, Any]] = None
+    thread: Optional[Thread] = None
+    stop_event: Optional[Event] = None
 
 
 class JobStore:
@@ -49,6 +51,26 @@ class JobStore:
                 record.error = fields["error"]
             if "result" in fields:
                 record.result = fields["result"]
+    
+    def set_job_thread(self, job_id: str, thread: Thread, stop_event: Event) -> None:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            if record is None:
+                record = JobRecord(job_id=job_id, status="running", thread=thread, stop_event=stop_event)
+                self._jobs[job_id] = record
+            else:
+                record.thread = thread
+                record.stop_event = stop_event
+    
+    def get_job_thread(self, job_id: str) -> Optional[Thread]:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            return record.thread if record else None
+    
+    def get_job_stop_event(self, job_id: str) -> Optional[Event]:
+        with self._lock:
+            record = self._jobs.get(job_id)
+            return record.stop_event if record else None
 
     def _load_from_disk(self, job_id: str) -> Optional[JobRecord]:
         meta_path = self._outputs_root / job_id / "meta.json"

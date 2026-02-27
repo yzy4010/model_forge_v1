@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from hashlib import sha1
 from pathlib import Path
-from threading import Thread
+from threading import Thread, Event
 from typing import Any, Dict, Iterable, Optional
 import re
 from uuid import uuid4
@@ -540,6 +540,7 @@ def _run_yolo_job(
     request: YoloTrainRequest,
     meta_hyperparams: Optional[Dict[str, Any]] = None,
     train_hyperparams: Optional[Dict[str, Any]] = None,
+    stop_event: Optional[Event] = None,
 ) -> None:
     created_at = utc_now_iso()
     job_store.update_job(job_id, status="running")
@@ -607,12 +608,23 @@ def _run_yolo_job(
             train_mode=request.train_mode,
             job_id=job_id,
             resume_from=request.resume_from,
+            stop_event=stop_event,
         )
         finished_at = utc_now_iso()
+        
+        # 检查任务是否被停止
+        job_status = job_store.get_job(job_id).status if job_store.get_job(job_id) else "running"
+        if job_status == "stopping":
+            status = "stopped"
+            message = "Training stopped by user"
+        else:
+            status = "completed"
+            message = "Training completed successfully"
+        
         meta_path = write_meta(
             outputs_dir=outputs_dir,
             job_id=job_id,
-            status="completed",
+            status=status,
             raw_run_dir=result.get("raw_run_dir"),
             run_dir=result.get("run_dir"),
             artifacts_dir=result.get("artifacts_dir"),
@@ -630,7 +642,8 @@ def _run_yolo_job(
         result["meta_path"] = str(meta_path.resolve())
         result["created_at"] = created_at
         result["finished_at"] = finished_at
-        job_store.update_job(job_id, status="completed", result=result)
+        result["message"] = message
+        job_store.update_job(job_id, status=status, result=result)
     except Exception as exc:
         finished_at = utc_now_iso()
         meta_path = write_meta(
@@ -708,12 +721,22 @@ def train_yolo_new(request: YoloTrainNewRequest) -> TrainResponse:
     job_store.create_job(job_id)
     outputs_dir = Path("outputs") / job_id
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 创建停止事件
+    stop_event = Event()
+    
+    # 创建训练线程
     thread = Thread(
         target=_run_yolo_job,
-        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams),
+        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams, stop_event),
         daemon=True,
     )
+    
+    # 存储线程和停止事件
+    job_store.set_job_thread(job_id, thread, stop_event)
+    
+    # 启动线程
     thread.start()
+    
     return TrainResponse(job_id=job_id, status="queued")
 
 
@@ -796,13 +819,49 @@ def train_yolo_continue(request: YoloTrainContinueRequest) -> TrainResponse:
     job_store.create_job(job_id)
     outputs_dir = Path("outputs") / job_id
     outputs_dir.mkdir(parents=True, exist_ok=True)
+    # 创建停止事件
+    stop_event = Event()
+    
+    # 创建训练线程
     thread = Thread(
         target=_run_yolo_job,
-        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams),
+        args=(job_id, yolo_request, meta_hyperparams, train_hyperparams, stop_event),
         daemon=True,
     )
+    
+    # 存储线程和停止事件
+    job_store.set_job_thread(job_id, thread, stop_event)
+    
+    # 启动线程
     thread.start()
+    
     return TrainResponse(job_id=job_id, status="queued")
+
+
+@app.post("/train/{job_id}/stop")
+def stop_train(job_id: str) -> dict:
+    """终止指定的训练任务"""
+    # 获取任务记录
+    job = job_store.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="Job not found")
+    
+    # 检查任务状态
+    if job.status not in {"running", "queued"}:
+        return {"status": "error", "message": f"Job is not running or queued, current status: {job.status}"}
+    
+    # 获取停止事件
+    stop_event = job_store.get_job_stop_event(job_id)
+    if not stop_event:
+        return {"status": "error", "message": "Cannot stop job, no stop event found"}
+    
+    # 设置停止事件
+    stop_event.set()
+    
+    # 更新任务状态
+    job_store.update_job(job_id, status="stopping")
+    
+    return {"status": "success", "message": f"Stop signal sent to job {job_id}"}
 
 
 @app.get("/train/{job_id}/progress")

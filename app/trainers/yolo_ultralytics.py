@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from threading import Event
 from typing import Any, Dict, List, Optional, Tuple
 import contextlib
 import csv
@@ -57,13 +58,25 @@ class TeeStream:
 
     def write(self, data: str) -> int:
         for stream in self._streams:
-            stream.write(data)
-            stream.flush()
+            # 增加关闭检查，防止由于 I/O 关闭导致的崩溃
+            if not stream or getattr(stream, 'closed', False):
+                continue
+            try:
+                stream.write(data)
+                stream.flush()
+            except (ValueError, AttributeError):
+                pass  # 流已关闭，静默处理
         return len(data)
 
     def flush(self) -> None:
         for stream in self._streams:
-            stream.flush()
+            # 增加关闭检查，防止由于 I/O 关闭导致的崩溃
+            if not stream or getattr(stream, 'closed', False):
+                continue
+            try:
+                stream.flush()
+            except (ValueError, AttributeError):
+                pass  # 流已关闭，静默处理
 
 
 class MetricsWatcher(threading.Thread):
@@ -222,6 +235,7 @@ def run_yolo_train(
     job_id: str,
     java_api_url: str = "http://localhost:8080/api/train/metrics",
     resume_from: Optional[str] = None,
+    stop_event: Optional[Event] = None,
 ) -> Dict[str, Any]:
     job_root = outputs_dir.resolve()
     job_root.mkdir(parents=True, exist_ok=True)
@@ -266,7 +280,83 @@ def run_yolo_train(
                 if train_mode == "resume":
                     train_args["resume"] = True
                 logger.info("Starting YOLO training with mode=%s", train_mode)
-                model.train(**train_args)
+
+                # 1. 定义异常（保持不变）
+                class TrainingInterruptedError(Exception):
+                    pass
+
+                # 2. 修改回调函数：直接引用外部的 stop_event 对象，而不是从 trainer 里找
+                def on_train_batch_start_callback(trainer):
+                    # 直接使用闭包中的 stop_event，这是最可靠的
+                    if stop_event.is_set():
+                        raise TrainingInterruptedError("Training stop signal received.")
+
+                # 3. 注册逻辑
+                # 注意：一定要在 model.train() 之前调用
+                model.add_callback("on_train_batch_start", on_train_batch_start_callback)
+                # 将 stop_event 传递给模型，以便在回调中访问
+                model.stop_event = stop_event
+                
+                # 启动训练线程
+                def train_thread():
+                    try:
+                        # 确保在这个线程上下文里，model 依然带有回调
+                        model.train(**train_args)
+                    except TrainingInterruptedError:
+                        # 这是我们主动触发的停止，不需要打印错误堆栈
+                        logger.warning("YOLO training sequence interrupted by user.")
+                    except Exception as e:
+                        # 处理其他真正的意外错误
+                        logger.error(f"YOLO training encountered a fatal error: {e}")
+                    finally:
+                        # 这里可以放置一些清理代码，例如手动释放显存（可选）
+                        import torch
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        logger.info("YOLO thread: Resources cleaned up.")
+                        # 处理 ClearML 等外部集成
+                        try:
+                            from clearml import Task
+                            # 尝试获取当前任务并标记为完成
+                            current_task = Task.current_task()
+                            if current_task:
+                                try:
+                                    current_task.mark_completed()
+                                except Exception as clearml_error:
+                                    logger.warning(f"Failed to mark ClearML task as completed: {clearml_error}")
+                        except Exception as e:
+                            logger.warning(f"ClearML cleanup failed: {e}")
+                        logger.info("YOLO resources released (CUDA cache cleanup usually happens here).")
+
+                # 启动线程
+                train_thread_instance = threading.Thread(target=train_thread)
+                train_thread_instance.daemon = True
+                train_thread_instance.start()
+
+                # 改进的监控逻辑
+                stop_signal_logged = False  # 增加一个标记位，防止刷屏
+
+                while train_thread_instance.is_alive():
+                    if stop_event.is_set():
+                        if not stop_signal_logged:
+                            logger.info("Stop signal detected. Waiting for YOLO to catch it at next batch...")
+                            stop_signal_logged = True
+
+                        # 核心改进：既然已经触发停止，主循环就进入阻塞等待，不再循环 sleep
+                        train_thread_instance.join(timeout=1)
+                        continue  # 继续检查 is_alive
+
+                    time.sleep(1)  # 正常运行期间的轮询频率
+
+                logger.info("Training thread has fully terminated.")
+                
+                # 只有当线程真正结束后，才进行后续逻辑
+                train_thread_instance.join(timeout=10)
+                
+                if train_thread_instance.is_alive():
+                    logger.error("Critical: Training thread did not terminate within timeout! Potential deadlock.")
+                else:
+                    logger.info("Training session ended successfully.")
         except Exception as exc:
             if train_mode == "resume":
                 raise RuntimeError(f"Resume failed: {exc}") from exc
