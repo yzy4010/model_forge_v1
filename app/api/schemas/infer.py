@@ -1,5 +1,4 @@
-from typing import List, Optional
-
+from typing import List, Optional, Dict, Any
 from pydantic import BaseModel, Field
 
 
@@ -20,9 +19,38 @@ class ScenarioModel(BaseModel):
     params: InferParams = Field(..., description="Inference parameters")
 
 
+# ================= 新增 ROI 结构 =================
+
+class ROIResolution(BaseModel):
+    width: int
+    height: int
+
+
+class ROIGeometry(BaseModel):
+    points: List[List[int]]
+
+
+class ROIItem(BaseModel):
+    roi_id: str
+    name: str
+    semantic_tag: str
+    enabled: bool = True
+    geometry: ROIGeometry
+
+
+class ROIConfig(BaseModel):
+    camera_id: str
+    config_version: int
+    resolution: ROIResolution
+    rois: List[ROIItem]
+
+
+# ================= 修改 ScenarioSnapshot =================
+
 class ScenarioSnapshot(BaseModel):
     scenario_id: str = Field(..., description="Scenario identifier")
     models: List[ScenarioModel] = Field(..., description="Scenario model snapshots")
+    roi_config: Optional[ROIConfig] = None   # 👈 关键新增
 
 
 class InferStreamRequest(BaseModel):

@@ -19,6 +19,9 @@ from app.infer.job_registry import job_manager
 from app.infer.model_loader import load_models
 from app.infer.push import WebhookSender
 from app.infer.visualize import draw_alias_detections
+from app.roi_engine import ROIEngine
+from typing import Optional
+from app.roi_engine.roi_draw import draw_rois
 
 logger = logging.getLogger("model_forge.infer.routes")
 
@@ -121,25 +124,44 @@ def _fmt_alias_summary(results: dict, aliases: list) -> str:
 
 
 def _run_job(
-    job_id: str,
-    rtsp_url: str,
-    sample_fps: float,
-    models_by_alias: Dict[str, AliasModel],
-    aliases: list[str],
-    sender: WebhookSender,
+        job_id: str,
+        rtsp_url: str,
+        sample_fps: float,
+        models_by_alias: Dict[str, AliasModel],
+        aliases: list[str],
+        sender: WebhookSender,
+        roi_config: Optional[dict] = None
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
         return
+
     t0 = time.time()
     logger.warning("Runner start job_id=%s scenario_id=%s", job_id, job.scenario_id)
+
     frames_done = 0
     failed = False
+
     if sample_fps <= 0:
         raise ValueError("sample_fps must be positive")
+
     interval_s = 1.0 / sample_fps
     next_emit_time = time.monotonic()
     frame_idx = 0
+
+    # ================= ROI 初始化 =================
+    roi_engine = None
+    if roi_config:
+        print("DEBUG ROI CONFIG初始化:", roi_config)
+        try:
+            roi_engine = ROIEngine(roi_config)
+            logger.info("ROI engine enabled for job %s", job_id)
+        except Exception:
+            logger.exception("Failed to initialize ROI engine, disabling ROI")
+            roi_engine = None
+    else:
+        logger.info("ROI not configured for job %s", job_id)
+    # =================================================
     try:
         while True:
             if job.stop_event.is_set():
@@ -149,26 +171,65 @@ def _run_job(
                     frame_idx,
                 )
                 break
+
             if job.status != "running":
                 break
+
             now = time.monotonic()
             if now < next_emit_time:
                 time.sleep(min(0.01, next_emit_time - now))
                 continue
+
             with job.raw_lock:
                 frame = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
+
             if frame is None:
                 time.sleep(0.05)
                 continue
+
             ts_ms = int(time.time() * 1000)
+
+            # ================= 模型推理 =================
             event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
             event_results = event.get("results", {}) or {}
+            # ===========================================
+
+            # ================= ROI 应用 =================
+            if roi_engine and event_results:
+                try:
+                    for alias_name, alias_result in event_results.items():
+                        detections = alias_result.get("detections", [])
+                        if detections:
+                            processed = roi_engine.apply(detections)
+                            alias_result["detections"] = processed
+                except Exception:
+                    logger.exception("ROI apply failed")
+            # ===========================================
+
+            # 保持原有绘制逻辑
             overlay = draw_alias_detections(frame, event_results)
+
+            # 画 ROI，并根据 roi_tags 判断是否命中
+            logger.info("ROI 配置状态: ROI config in draw_rois: %s", roi_config)
+            logger.info("ROI 引擎状态: ROI engine status: %s", roi_engine is not None)
+            logger.info("事件结果: Event results: %s", event_results)
+            if roi_config:
+                logger.info("进入 ROI 绘制逻辑: Entering ROI draw logic")
+                try:
+                    overlay = draw_rois(overlay, roi_config, event_results)
+                    logger.info("ROI 绘制完成: ROI draw completed successfully")
+                except Exception:
+                    logger.exception("ROI 绘制失败: ROI draw failed")
+            else:
+                logger.info("ROI 配置为空，跳过绘制: ROI config is None, skipping ROI draw")
+
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
                 job.latest_frame_ts_ms = ts_ms
+
             with job.res_lock:
                 job.latest_results = copy.deepcopy(event_results)
+
             try:
                 validate_event(event)
             except AssertionError as exc:
@@ -180,32 +241,44 @@ def _run_job(
                 )
                 next_emit_time = now + interval_s
                 continue
+
             elapsed = time.time() - t0
             qps = (frame_idx + 1) / elapsed if elapsed > 0 else 0.0
             alias_summary = _fmt_alias_summary(event_results, aliases)
+
             logger.warning(
-                "MF_FRAME_SUMMARY job=%s frame=%s qps~%.2f results={%s}",
+                "MF_FRAME_SUMMARY job=%s frame=%s qps~%.2f elapsed=%.3fs ts_ms=%d results={%s} event_results=%s",
                 job_id,
                 frame_idx,
                 qps,
+                elapsed,
+                ts_ms,
                 alias_summary,
+                event_results,
             )
+
             sender.enqueue(event)
+
             job.frame_idx = frame_idx
             frames_done = frame_idx
             frame_idx += 1
             next_emit_time = max(next_emit_time + interval_s, time.monotonic())
+
     except Exception:
         failed = True
         logger.exception("Runner failed job_id=%s", job_id)
         _mark_job_failed(job)
         job.stop_event.set()
+
     finally:
         sender.stop(timeout_s=1.0)
+
         if job.stop_event.is_set() or job.status == "stopping":
             _mark_job_stopped(job)
+
         reason = "stopped" if job.stop_event.is_set() else "finished"
         elapsed = time.time() - t0
+
         logger.warning(
             "Runner exit job_id=%s scenario_id=%s reason=%s frames_done=%s elapsed_s=%.3f",
             job_id,
@@ -270,10 +343,17 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         job_manager.stop_job(job_id)
         raise
 
+    # 传递 ROI 配置
+    roi_config = getattr(req.scenario, "roi_config", None)  # 从请求中获取 ROI 配置
+    logger.info("ROI 配置接收: ROI config received: %s", roi_config)
+    if roi_config is not None:
+        roi_config = roi_config.model_dump()
+        logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
+
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender),
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config),  # 传递 roi_config
         daemon=True,
     )
     job = job_manager.get_job(job_id)
