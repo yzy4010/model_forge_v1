@@ -152,10 +152,11 @@ def _run_job(
     # ================= ROI 初始化 =================
     roi_engine = None
     if roi_config:
-        print("DEBUG ROI CONFIG初始化:", roi_config)
         try:
             roi_engine = ROIEngine(roi_config)
             logger.info("ROI engine enabled for job %s", job_id)
+            # 将 roi_config 保存到 job 对象中，以便 preview 接口使用
+            job.roi_config = roi_config
         except Exception:
             logger.exception("Failed to initialize ROI engine, disabling ROI")
             roi_engine = None
@@ -210,22 +211,27 @@ def _run_job(
             overlay = draw_alias_detections(frame, event_results)
 
             # 画 ROI，并根据 roi_tags 判断是否命中
-            logger.info("ROI 配置状态: ROI config in draw_rois: %s", roi_config)
-            logger.info("ROI 引擎状态: ROI engine status: %s", roi_engine is not None)
-            logger.info("事件结果: Event results: %s", event_results)
             if roi_config:
-                logger.info("进入 ROI 绘制逻辑: Entering ROI draw logic")
                 try:
                     overlay = draw_rois(overlay, roi_config, event_results)
-                    logger.info("ROI 绘制完成: ROI draw completed successfully")
                 except Exception:
-                    logger.exception("ROI 绘制失败: ROI draw failed")
-            else:
-                logger.info("ROI 配置为空，跳过绘制: ROI config is None, skipping ROI draw")
+                    logger.exception("ROI draw failed")
 
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
                 job.latest_frame_ts_ms = ts_ms
+
+            # 更新 overlay_path 指向的图片，添加 ROI 绘制
+            for alias_name, alias_result in event_results.items():
+                image_info = alias_result.get("image")
+                if image_info and "overlay_path" in image_info:
+                    overlay_path = image_info["overlay_path"]
+                    try:
+                        # 保存包含 ROI 的 overlay 到同一个路径
+                        cv2.imwrite(overlay_path, overlay)
+                        logger.info("Updated overlay image with ROI at: %s", overlay_path)
+                    except Exception:
+                        logger.exception("Failed to update overlay image with ROI")
 
             with job.res_lock:
                 job.latest_results = copy.deepcopy(event_results)

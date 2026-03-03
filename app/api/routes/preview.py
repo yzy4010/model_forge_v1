@@ -8,6 +8,7 @@ from fastapi.responses import StreamingResponse
 
 from app.infer.job_registry import job_manager
 from app.infer.visualize import draw_alias_detections
+from app.roi_engine.roi_draw import draw_rois
 
 router = APIRouter(tags=["preview"])
 
@@ -40,6 +41,11 @@ def preview(job_id: str) -> StreamingResponse:
             with job.res_lock:
                 results = {} if job.latest_results is None else dict(job.latest_results)
             frame = draw_alias_detections(frame, results)
+            
+            # 绘制 ROI 区域
+            roi_config = getattr(job, 'roi_config', None)
+            if roi_config:
+                frame = draw_rois(frame, roi_config, results)
             height, width = frame.shape[:2]
             if width > 960:
                 scale = 960 / width
