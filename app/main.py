@@ -6,6 +6,7 @@ from threading import Thread, Event
 from typing import Any, Dict, Iterable, Optional
 import re
 from uuid import uuid4
+import logging
 
 from clearml import Task
 from fastapi import FastAPI, HTTPException
@@ -31,6 +32,12 @@ from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
 from app.services.yolo_presets import resolve_augment_params, supports_freeze_param
 from app.trainers.yolo_ultralytics import run_yolo_train
+
+# 配置日志
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 
 app = FastAPI(title="ModelForge v1")
 app.include_router(infer_router)

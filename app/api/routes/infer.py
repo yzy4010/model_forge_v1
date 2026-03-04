@@ -252,16 +252,36 @@ def _run_job(
             qps = (frame_idx + 1) / elapsed if elapsed > 0 else 0.0
             alias_summary = _fmt_alias_summary(event_results, aliases)
 
+            # 简化 event_results 信息，包含关键数据和ROI信息
+            simplified_results = {}
+            for alias, result in event_results.items():
+                # 提取检测结果和ROI标签
+                detections = []
+                for det in result.get('detections', []):
+                    detections.append({
+                        'label': det.get('label', ''),
+                        'conf': det.get('conf', 0.0),
+                        'roi_tags': det.get('roi_tags', [])
+                    })
+                
+                simplified_results[alias] = {
+                    'detected': result.get('conclusion', {}).get('detected', False),
+                    'score': result.get('conclusion', {}).get('score', 0.0),
+                    'num_det': result.get('summary', {}).get('num_det', 0),
+                    'detections': detections
+                }
+
             logger.warning(
-                "MF_FRAME_SUMMARY job=%s frame=%s qps~%.2f elapsed=%.3fs ts_ms=%d results={%s} event_results=%s",
+                "MF_FRAME_SUMMARY job=%s scenario_id=%s frame=%s qps=%.2f elapsed=%.3fs ts_ms=%d results={%s}",
                 job_id,
+                job.scenario_id,
                 frame_idx,
                 qps,
                 elapsed,
                 ts_ms,
-                alias_summary,
-                event_results,
+                alias_summary
             )
+            logger.debug("Event results: %s", simplified_results)
 
             sender.enqueue(event)
 
