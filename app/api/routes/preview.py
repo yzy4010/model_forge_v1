@@ -9,16 +9,30 @@ from fastapi.responses import StreamingResponse
 from app.infer.job_registry import job_manager
 from app.infer.visualize import draw_alias_detections
 from app.roi_engine.roi_draw import draw_rois
+import logging
+logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["preview"])
 
 
 @router.get("/preview/{job_id}")
 def preview(job_id: str) -> StreamingResponse:
+    # Step 1: 获取 Job 实例
     job = job_manager.get_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="job not found")
 
+    logger.info("Previewing job_id=%s scenario_id=%s", job_id, job.scenario_id)
+
+    # Step 2: 获取 RuleEngine 和 ROI 配置
+    if not job or not hasattr(job, "rule_engine"):
+        raise HTTPException(status_code=400, detail="RuleEngine not initialized for job")
+    rule_engine = job.rule_engine
+
+    roi_config = job.roi_config if hasattr(job, 'roi_config') else None
+    logger.info("ROI config used for preview: %s", roi_config)
+
+    # Step 3: 创建图像生成器
     def gen():
         boundary = b"--frame\r\n"
         last_sent_after_stop = False
@@ -27,33 +41,41 @@ def preview(job_id: str) -> StreamingResponse:
                 break
 
             with job.raw_lock:
-                frame = (
-                    None
-                    if job.latest_raw_frame_bgr is None
-                    else job.latest_raw_frame_bgr.copy()
-                )
+                # 获取原始帧
+                frame = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
 
             if frame is None:
                 if job.stop_event.is_set():
                     break
                 time.sleep(0.05)
                 continue
+
             with job.res_lock:
-                results = {} if job.latest_results is None else dict(job.latest_results)
-            frame = draw_alias_detections(frame, results)
-            
-            # 绘制 ROI 区域
-            roi_config = getattr(job, 'roi_config', None)
+                event_results = {} if job.latest_results is None else dict(job.latest_results)
+
+            # --- 修改点 1: 确保绘制后的图像被传递 ---
+            # 绘制模型检测框
+            overlay = draw_alias_detections(frame, event_results)
+
             if roi_config:
-                frame = draw_rois(frame, roi_config, results)
-            height, width = frame.shape[:2]
+                # 评估规则
+                rule_output = rule_engine.evaluate_frame(event_results)
+                # --- 修改点 2: 提取正确的 roi_status 字典 ---
+                current_roi_status = rule_output.get("roi_status", {})
+                # 在绘制过检测框的 overlay 上继续绘制 ROI
+                overlay = draw_rois(overlay, roi_config, roi_status=current_roi_status)
+
+            # --- 修改点 3: 缩放和编码必须使用 overlay ---
+            display_frame = overlay  # 使用绘制了结果的图像
+
+            height, width = display_frame.shape[:2]
             if width > 960:
                 scale = 960 / width
-                frame = cv2.resize(frame, (960, int(height * scale)))
+                display_frame = cv2.resize(display_frame, (960, int(height * scale)))
 
             ok, jpg = cv2.imencode(
                 ".jpg",
-                frame,
+                display_frame,  # 确保这里是 display_frame (即 overlay)
                 [int(cv2.IMWRITE_JPEG_QUALITY), 70],
             )
             if not ok:

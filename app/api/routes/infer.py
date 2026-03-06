@@ -22,6 +22,7 @@ from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
 from app.roi_engine.roi_draw import draw_rois
+from app.rule_engine import RuleEngine
 
 logger = logging.getLogger("model_forge.infer.routes")
 
@@ -130,7 +131,8 @@ def _run_job(
         models_by_alias: Dict[str, AliasModel],
         aliases: list[str],
         sender: WebhookSender,
-        roi_config: Optional[dict] = None
+        roi_config: Optional[dict] = None,
+        rule_engine: Optional[RuleEngine] = None  # 接收 rule_engine
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
@@ -163,6 +165,7 @@ def _run_job(
     else:
         logger.info("ROI not configured for job %s", job_id)
     # =================================================
+
     try:
         while True:
             if job.stop_event.is_set():
@@ -210,12 +213,18 @@ def _run_job(
             # 保持原有绘制逻辑
             overlay = draw_alias_detections(frame, event_results)
 
-            # 画 ROI，并根据 roi_tags 判断是否命中
-            if roi_config:
+            # 使用 RuleEngine 来计算 roi_status
+            if rule_engine:
+                logger.info("RuleEngine 已初始化，开始评估规则")
+                logger.info("RuleEngine 输入 event_results=%s", event_results)
                 try:
-                    overlay = draw_rois(overlay, roi_config, event_results)
-                except Exception:
-                    logger.exception("ROI draw failed")
+                    roi_status = rule_engine.evaluate_frame(event_results)  # 使用 RuleEngine 进行规则评估
+                    logger.info("RuleEngine 评估结果: %s", roi_status)
+                    overlay = draw_rois(overlay, roi_config, roi_status=roi_status)  # 使用计算出来的 roi_status 绘制
+                except Exception as e:
+                    logger.exception("RuleEngine 评估失败: %s", e)
+            else:
+                logger.info("RuleEngine 未初始化")
 
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
@@ -263,7 +272,7 @@ def _run_job(
                         'conf': det.get('conf', 0.0),
                         'roi_tags': det.get('roi_tags', [])
                     })
-                
+
                 simplified_results[alias] = {
                     'detected': result.get('conclusion', {}).get('detected', False),
                     'score': result.get('conclusion', {}).get('score', 0.0),
@@ -352,6 +361,24 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     if not req.rtsp_url:
         raise HTTPException(status_code=400, detail="rtsp_url is required")
 
+    # 初始化 RuleEngine 并传递规则参数
+    # 初始化 RuleEngine 并传递规则参数
+    rule_config = getattr(req.scenario, "rules", None)
+
+    logger.info(f"Rules config received: {rule_config}")
+
+    if not rule_config:
+        raise HTTPException(status_code=400, detail="Rules configuration is required")
+
+    try:
+        logger.info("开始初始化 RuleEngine")
+        rule_engine = RuleEngine(rules=rule_config)
+        logger.info("RuleEngine 初始化成功")
+    except Exception as e:
+        logger.exception("RuleEngine 初始化失败: %s", e)
+        raise HTTPException(status_code=400, detail=f"Invalid rules configuration: {str(e)}")
+
+    # 开始推理任务
     job_id = job_manager.start_job(
         {
             "scenario_id": req.scenario.scenario_id,
@@ -359,6 +386,12 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
             "sample_fps": req.sample_fps,
         }
     )
+
+    job = job_manager.get_job(job_id)
+
+    if job is not None:
+        job.rule_engine = rule_engine
+
     try:
         models_by_alias = _build_models(req, job_id)
         aliases = [model.alias for model in req.scenario.models]
@@ -377,11 +410,16 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
+
+    # 启动推理线程，并将 rule_engine 传递给 _run_job
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config),  # 传递 roi_config
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine),
+        # 传递 rule_engine
         daemon=True,
     )
+
+    # 获取并启动推理任务的其他线程
     job = job_manager.get_job(job_id)
     if job is not None:
         job.thread = thread
@@ -393,6 +431,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         )
         job.grabber_thread = grabber_thread
         grabber_thread.start()
+
     thread.start()
 
     return InferStartResponse(job_id=job_id, status="running")

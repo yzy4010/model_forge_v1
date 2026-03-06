@@ -51,6 +51,7 @@ class ScenarioSnapshot(BaseModel):
     scenario_id: str = Field(..., description="Scenario identifier")
     models: List[ScenarioModel] = Field(..., description="Scenario model snapshots")
     roi_config: Optional[ROIConfig] = None   # 👈 关键新增
+    rules: Optional[list] = None
 
 
 class InferStreamRequest(BaseModel):
