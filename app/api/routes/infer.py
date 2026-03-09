@@ -361,36 +361,31 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     if not req.rtsp_url:
         raise HTTPException(status_code=400, detail="rtsp_url is required")
 
-    # 初始化 RuleEngine 并传递规则参数
-    # 初始化 RuleEngine 并传递规则参数
+    # 获取规则配置
     rule_config = getattr(req.scenario, "rules", None)
 
+    # 记录规则配置
     logger.info(f"Rules config received: {rule_config}")
 
+    # 如果没有规则配置，跳过规则引擎初始化
     if not rule_config:
-        raise HTTPException(status_code=400, detail="Rules configuration is required")
-
-    try:
-        logger.info("开始初始化 RuleEngine")
-        rule_engine = RuleEngine(rules=rule_config)
-        logger.info("RuleEngine 初始化成功")
-    except Exception as e:
-        logger.exception("RuleEngine 初始化失败: %s", e)
-        raise HTTPException(status_code=400, detail=f"Invalid rules configuration: {str(e)}")
+        logger.info("No rules configuration provided. Skipping RuleEngine initialization.")
+        rule_engine = None  # 没有规则配置时，不初始化 RuleEngine
+    else:
+        try:
+            logger.info("开始初始化 RuleEngine")
+            rule_engine = RuleEngine(rules=rule_config)  # 初始化 RuleEngine
+            logger.info("RuleEngine 初始化成功")
+        except Exception as e:
+            logger.exception("RuleEngine 初始化失败: %s", e)
+            raise HTTPException(status_code=400, detail=f"Invalid rules configuration: {str(e)}")
 
     # 开始推理任务
-    job_id = job_manager.start_job(
-        {
-            "scenario_id": req.scenario.scenario_id,
-            "rtsp_url": req.rtsp_url,
-            "sample_fps": req.sample_fps,
-        }
-    )
-
-    job = job_manager.get_job(job_id)
-
-    if job is not None:
-        job.rule_engine = rule_engine
+    job_id = job_manager.start_job({
+        "scenario_id": req.scenario.scenario_id,
+        "rtsp_url": req.rtsp_url,
+        "sample_fps": req.sample_fps,
+    })
 
     try:
         models_by_alias = _build_models(req, job_id)
@@ -403,23 +398,19 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         raise
 
     # 传递 ROI 配置
-    roi_config = getattr(req.scenario, "roi_config", None)  # 从请求中获取 ROI 配置
-    logger.info("ROI 配置接收: ROI config received: %s", roi_config)
+    roi_config = getattr(req.scenario, "roi_config", None)
     if roi_config is not None:
         roi_config = roi_config.model_dump()
-        logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
 
-    # 启动推理线程，并将 rule_engine 传递给 _run_job
+    # 启动推理线程
     thread = Thread(
         target=_run_job,
         args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine),
-        # 传递 rule_engine
         daemon=True,
     )
 
-    # 获取并启动推理任务的其他线程
     job = job_manager.get_job(job_id)
     if job is not None:
         job.thread = thread
