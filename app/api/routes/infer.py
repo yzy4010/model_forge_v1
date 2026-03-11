@@ -18,7 +18,7 @@ from app.infer.job import InferenceJob
 from app.infer.job_registry import job_manager
 from app.infer.model_loader import load_models
 from app.infer.push import WebhookSender
-from app.infer.storage import save_overlay
+from app.infer.storage import save_triggered_image
 from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
@@ -151,6 +151,27 @@ def _extract_triggered_aliases(expr: object) -> set[str]:
     return aliases
 
 
+
+
+def _normalize_rule_expr_to_or(expr: object) -> object:
+    """Normalize incoming rule expression to OR logic for grouped conditions."""
+    if isinstance(expr, dict):
+        normalized = {}
+        for key, value in expr.items():
+            if key in ("and", "all") and isinstance(value, list):
+                normalized["or"] = [_normalize_rule_expr_to_or(item) for item in value]
+            elif key in ("or", "any") and isinstance(value, list):
+                normalized["or"] = [_normalize_rule_expr_to_or(item) for item in value]
+            elif key == "not" and isinstance(value, dict):
+                normalized[key] = _normalize_rule_expr_to_or(value)
+            elif key == "conditions" and isinstance(value, dict):
+                normalized[key] = _normalize_rule_expr_to_or(value)
+            else:
+                normalized[key] = _normalize_rule_expr_to_or(value) if isinstance(value, (dict, list)) else value
+        return normalized
+    if isinstance(expr, list):
+        return [_normalize_rule_expr_to_or(item) for item in expr]
+    return expr
 def _build_rule_overlay_text(alerts: list[dict], aliases: list[str], event_results: dict) -> list[str]:
     lines: list[str] = []
     if alerts:
@@ -253,11 +274,6 @@ def _run_job(
                 )
                 if detected:
                     detected_aliases.append(alias)
-            fallback_aliases = ["person", "helmet", "vest", "smoking"]
-            if not detected_aliases:
-                for alias in fallback_aliases:
-                    if alias in aliases_for_rule and alias not in detected_aliases:
-                        detected_aliases.append(alias)
             alerts.append(
                 {
                     "rule_id": rid,
@@ -356,19 +372,19 @@ def _run_job(
                     alias_result = event_results.get(alias_name, {})
                     image_info = alias_result.get("image") if isinstance(alias_result, dict) else None
                     overlay_path = image_info.get("overlay_path") if isinstance(image_info, dict) else None
-                    if not overlay_path:
-                        try:
-                            overlay_path = save_overlay(overlay, job_id, frame_idx, alias_name)
+                    try:
+                        overlay_path = save_triggered_image(
+                            overlay,
+                            job_id,
+                            frame_idx,
+                            alias_name,
+                            output_path=overlay_path,
+                        )
+                        if isinstance(alias_result, dict):
                             alias_result["image"] = {
                                 "type": "file",
                                 "overlay_path": overlay_path,
                             }
-                        except Exception:
-                            logger.exception("Failed to allocate overlay path for rule-matched image")
-                            continue
-
-                    try:
-                        cv2.imwrite(overlay_path, overlay)
                         logger.info("Saved rule-matched overlay image: %s", overlay_path)
                     except Exception:
                         logger.exception("Failed to save rule-matched overlay image")
@@ -538,7 +554,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
                 if not item_dict.get("enabled", True):
                     continue
                 rule_id = str(item_dict.get("rule_id") or "")
-                expr = item_dict.get("expr") or item_dict.get("conditions")
+                expr = _normalize_rule_expr_to_or(item_dict.get("expr") or item_dict.get("conditions"))
                 if not rule_id or not expr:
                     continue
                 compiled_rules.append({"name": rule_id, "expr": expr, "enabled": True})
