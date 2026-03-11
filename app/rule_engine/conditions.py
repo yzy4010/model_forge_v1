@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 from typing import Any, Mapping
 
+
+
+logger = logging.getLogger("model_forge.rule_engine")
 
 _COMPARATORS = {
     "gt": lambda a, b: a > b,
@@ -27,13 +31,15 @@ def alias_condition(value: str | list[str]):
     expected = _as_set(value)
 
     def _pred(ctx: Mapping[str, Any]) -> bool:
-        for person in ctx.get("person_objects", []):
-            objects = person.get("objects") or {}
-            for alias in expected:
-                if alias == "person":
-                    return True
-                if objects.get(alias):
-                    return True
+        person_objects = ctx.get("person_objects", [])
+        for alias in expected:
+            if alias == "person":
+                triggered = bool(person_objects)
+            else:
+                triggered = any((person.get("objects") or {}).get(alias) for person in person_objects)
+            logger.debug("Alias condition alias=%s triggered=%s persons=%s", alias, triggered, len(person_objects))
+            if triggered:
+                return True
         return False
 
     return _pred
@@ -42,17 +48,46 @@ def alias_condition(value: str | list[str]):
 def roi_condition(value: str | list[str], roi_index):
     expected = _as_set(value)
 
+    def _matches_roi_tags(tags: Any) -> bool:
+        return bool(set(tags or ()) & expected)
+
     def _pred(ctx: Mapping[str, Any]) -> bool:
         if not expected:
             return True
+
         person_objects = ctx.get("person_objects", [])
+        detections = ctx.get("detections", [])
+
         for person in person_objects:
-            if roi_index is not None and roi_index.has_rois:
-                if roi_index.check_in_roi(person, list(expected)):
-                    return True
-                continue
-            if bool(set(person.get("roi_tags") or ()) & expected):
+            if roi_index is not None and roi_index.has_rois and roi_index.check_in_roi(person, list(expected)):
+                logger.debug("ROI condition matched by person bbox roi=%s track_id=%s", sorted(expected), person.get("track_id"))
                 return True
+
+            if _matches_roi_tags(person.get("roi_tags")):
+                logger.debug("ROI condition matched by person roi_tags roi=%s track_id=%s", sorted(expected), person.get("track_id"))
+                return True
+
+            for alias, objects in (person.get("objects") or {}).items():
+                for obj in objects or []:
+                    if _matches_roi_tags(obj.get("roi_tags")):
+                        logger.debug(
+                            "ROI condition matched by object alias=%s roi=%s track_id=%s",
+                            alias,
+                            sorted(expected),
+                            person.get("track_id"),
+                        )
+                        return True
+
+        for det in detections:
+            if _matches_roi_tags(det.get("roi_tags")):
+                logger.debug(
+                    "ROI condition matched by detection alias=%s roi=%s",
+                    det.get("alias"),
+                    sorted(expected),
+                )
+                return True
+
+        logger.debug("ROI condition not matched roi=%s", sorted(expected))
         return False
 
     return _pred

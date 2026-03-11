@@ -116,13 +116,22 @@ class RuleEngine:
                     matched_models = sorted(available_aliases)
                     unmatched_models = []
 
+                alias_detection_stats = {
+                    alias: {
+                        "count": sum(1 for det in normalized if str(det.get("alias", "")).strip() == alias),
+                        "roi_hits": sorted({tag for det in normalized if str(det.get("alias", "")).strip() == alias for tag in (det.get("roi_tags") or ())}),
+                    }
+                    for alias in matched_models
+                }
+
                 self._logger.info(
-                    "Rule evaluation rule_id=%s triggered=%s condition=%s matched_models=%s unmatched_models=%s",
+                    "Rule evaluation rule_id=%s triggered=%s condition=%s matched_models=%s unmatched_models=%s alias_stats=%s",
                     rule_id,
                     triggered,
                     rule_expr,
                     matched_models,
                     unmatched_models,
+                    alias_detection_stats,
                 )
                 if triggered:
                     self._logger.info(
