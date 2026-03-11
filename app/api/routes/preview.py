@@ -13,25 +13,56 @@ from app.roi_engine.roi_draw import draw_rois
 router = APIRouter(tags=["preview"])
 
 
-def _draw_rule_alerts(frame, alerts):
+def _draw_rule_alerts(frame, alerts, results):
     if frame is None:
         return frame
     y = 30
     for alert in alerts or []:
         message = str(alert.get("message") or alert.get("rule_id") or "")
-        if not message:
-            continue
+        if message:
+            cv2.putText(
+                frame,
+                message,
+                (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.7,
+                (0, 0, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            y += 28
+
+        triggered_aliases = alert.get("triggered_aliases") or []
+        if triggered_aliases:
+            alias_line = f"Models: {', '.join(str(alias) for alias in triggered_aliases)}"
+            cv2.putText(
+                frame,
+                alias_line,
+                (10, y),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.65,
+                (0, 165, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            y += 26
+
+    detected_aliases = [
+        alias
+        for alias, result in (results or {}).items()
+        if bool((result.get("conclusion") or {}).get("detected", False))
+    ]
+    if detected_aliases:
         cv2.putText(
             frame,
-            message,
+            f"Detected: {', '.join(detected_aliases)}",
             (10, y),
             cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 255),
+            0.65,
+            (255, 255, 0),
             2,
             cv2.LINE_AA,
         )
-        y += 28
     return frame
 
 
@@ -73,7 +104,7 @@ def preview(job_id: str) -> StreamingResponse:
             if roi_config:
                 frame = draw_rois(frame, roi_config, results)
 
-            frame = _draw_rule_alerts(frame, rule_results.get("alerts", []))
+            frame = _draw_rule_alerts(frame, rule_results.get("alerts", []), results)
             height, width = frame.shape[:2]
             if width > 960:
                 scale = 960 / width

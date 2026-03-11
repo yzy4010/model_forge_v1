@@ -124,6 +124,64 @@ def _fmt_alias_summary(results: dict, aliases: list) -> str:
     return " ".join(parts)
 
 
+
+def _extract_triggered_aliases(expr: object) -> set[str]:
+    aliases: set[str] = set()
+    if isinstance(expr, dict):
+        alias_value = expr.get("alias")
+        if isinstance(alias_value, str) and alias_value:
+            aliases.add(alias_value)
+        elif isinstance(alias_value, list):
+            aliases.update(str(item) for item in alias_value if str(item))
+        for key in ("and", "or", "all", "any"):
+            branch = expr.get(key)
+            if isinstance(branch, list):
+                for item in branch:
+                    aliases.update(_extract_triggered_aliases(item))
+        nested_not = expr.get("not")
+        if isinstance(nested_not, dict):
+            aliases.update(_extract_triggered_aliases(nested_not))
+        nested_conditions = expr.get("conditions")
+        if isinstance(nested_conditions, dict):
+            aliases.update(_extract_triggered_aliases(nested_conditions))
+    elif isinstance(expr, list):
+        for item in expr:
+            aliases.update(_extract_triggered_aliases(item))
+    return aliases
+
+
+def _build_rule_overlay_text(alerts: list[dict], aliases: list[str], event_results: dict) -> list[str]:
+    lines: list[str] = []
+    if alerts:
+        lines.extend(str(alert.get("message") or alert.get("rule_id") or "").strip() for alert in alerts)
+    detected_aliases = [
+        alias
+        for alias in aliases
+        if bool((event_results.get(alias, {}) or {}).get("conclusion", {}).get("detected", False))
+    ]
+    if detected_aliases:
+        lines.append(f"Detected: {', '.join(detected_aliases)}")
+    return [line for line in lines if line]
+
+
+def _draw_rule_info(frame, lines: list[str]):
+    if frame is None:
+        return frame
+    y = 30
+    for line in lines:
+        cv2.putText(
+            frame,
+            str(line),
+            (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        y += 28
+    return frame
+
 def _run_job(
         job_id: str,
         rtsp_url: str,
@@ -134,6 +192,7 @@ def _run_job(
         roi_config: Optional[dict] = None,
         rule_engine: Optional[RuleEngine] = None,
         rule_meta: Optional[Dict[str, Dict[str, str]]] = None,
+        rule_aliases: Optional[Dict[str, set[str]]] = None,
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
@@ -166,17 +225,33 @@ def _run_job(
     else:
         logger.info("ROI not configured for job %s", job_id)
 
-    def _build_rule_alerts(rule_eval: Dict[str, bool]) -> list[dict]:
+    def _build_rule_alerts(rule_eval: Dict[str, bool], event_results: Dict[str, dict]) -> list[dict]:
         alerts = []
         for rid, triggered in (rule_eval or {}).items():
             if not triggered:
                 continue
             meta = (rule_meta or {}).get(rid, {})
+            aliases_for_rule = sorted((rule_aliases or {}).get(rid, set()))
+            detected_aliases = []
+            for alias in aliases_for_rule:
+                detected = bool(
+                    (event_results.get(alias, {}) or {})
+                    .get("conclusion", {})
+                    .get("detected", False)
+                )
+                if detected:
+                    detected_aliases.append(alias)
+            fallback_aliases = ["person", "helmet", "vest", "smoking"]
+            if not detected_aliases:
+                for alias in fallback_aliases:
+                    if alias in aliases_for_rule and alias not in detected_aliases:
+                        detected_aliases.append(alias)
             alerts.append(
                 {
                     "rule_id": rid,
                     "name": meta.get("name", rid),
                     "message": meta.get("message") or f"Rule triggered: {rid}",
+                    "triggered_aliases": detected_aliases,
                 }
             )
         return alerts
@@ -248,11 +323,15 @@ def _run_job(
                             det_obj["score"] = det.get("conf", 0.0)
                             detections_for_rule.append(det_obj)
                     rule_eval = rule_engine.evaluate(detections_for_rule)
-                    rule_results = {"results": rule_eval, "alerts": _build_rule_alerts(rule_eval)}
+                    rule_results = {"results": rule_eval, "alerts": _build_rule_alerts(rule_eval, event_results)}
                 except Exception:
                     logger.exception("Rule engine evaluate failed")
 
             event["rule_results"] = rule_results
+            overlay = _draw_rule_info(
+                overlay,
+                _build_rule_overlay_text(rule_results.get("alerts", []), aliases, event_results),
+            )
 
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
@@ -426,6 +505,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     raw_rules = getattr(req.scenario, "rule_config", None)
     rule_engine = None
     rule_meta: Dict[str, Dict[str, str]] = {}
+    rule_aliases: Dict[str, set[str]] = {}
     if raw_rules:
         try:
             compiled_rules = []
@@ -442,6 +522,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
                     "name": item_dict.get("name") or rule_id,
                     "message": item_dict.get("message") or f"Rule triggered: {rule_id}",
                 }
+                rule_aliases[rule_id] = _extract_triggered_aliases(expr)
             if compiled_rules:
                 rule_engine = RuleEngine(compiled_rules, roi_config=roi_config)
                 logger.info("Rule engine enabled for job %s with %s rules", job_id, len(compiled_rules))
@@ -449,11 +530,12 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
             logger.exception("Failed to initialize RuleEngine, disabling rules")
             rule_engine = None
             rule_meta = {}
+            rule_aliases = {}
 
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine, rule_meta),
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine, rule_meta, rule_aliases),
         daemon=True,
     )
     job = job_manager.get_job(job_id)
