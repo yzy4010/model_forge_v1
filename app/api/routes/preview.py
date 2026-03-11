@@ -13,6 +13,28 @@ from app.roi_engine.roi_draw import draw_rois
 router = APIRouter(tags=["preview"])
 
 
+def _draw_rule_alerts(frame, alerts):
+    if frame is None:
+        return frame
+    y = 30
+    for alert in alerts or []:
+        message = str(alert.get("message") or alert.get("rule_id") or "")
+        if not message:
+            continue
+        cv2.putText(
+            frame,
+            message,
+            (10, y),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 255),
+            2,
+            cv2.LINE_AA,
+        )
+        y += 28
+    return frame
+
+
 @router.get("/preview/{job_id}")
 def preview(job_id: str) -> StreamingResponse:
     job = job_manager.get_job(job_id)
@@ -40,12 +62,18 @@ def preview(job_id: str) -> StreamingResponse:
                 continue
             with job.res_lock:
                 results = {} if job.latest_results is None else dict(job.latest_results)
+                rule_results = (
+                    {} if getattr(job, "latest_rule_results", None) is None
+                    else dict(job.latest_rule_results)
+                )
             frame = draw_alias_detections(frame, results)
-            
+
             # 绘制 ROI 区域
             roi_config = getattr(job, 'roi_config', None)
             if roi_config:
                 frame = draw_rois(frame, roi_config, results)
+
+            frame = _draw_rule_alerts(frame, rule_results.get("alerts", []))
             height, width = frame.shape[:2]
             if width > 960:
                 scale = 960 / width

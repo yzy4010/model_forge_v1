@@ -22,6 +22,7 @@ from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
 from app.roi_engine.roi_draw import draw_rois
+from app.rule_engine import RuleEngine
 
 logger = logging.getLogger("model_forge.infer.routes")
 
@@ -130,7 +131,9 @@ def _run_job(
         models_by_alias: Dict[str, AliasModel],
         aliases: list[str],
         sender: WebhookSender,
-        roi_config: Optional[dict] = None
+        roi_config: Optional[dict] = None,
+        rule_engine: Optional[RuleEngine] = None,
+        rule_meta: Optional[Dict[str, Dict[str, str]]] = None,
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
@@ -162,6 +165,22 @@ def _run_job(
             roi_engine = None
     else:
         logger.info("ROI not configured for job %s", job_id)
+
+    def _build_rule_alerts(rule_eval: Dict[str, bool]) -> list[dict]:
+        alerts = []
+        for rid, triggered in (rule_eval or {}).items():
+            if not triggered:
+                continue
+            meta = (rule_meta or {}).get(rid, {})
+            alerts.append(
+                {
+                    "rule_id": rid,
+                    "name": meta.get("name", rid),
+                    "message": meta.get("message") or f"Rule triggered: {rid}",
+                }
+            )
+        return alerts
+
     # =================================================
     try:
         while True:
@@ -217,24 +236,52 @@ def _run_job(
                 except Exception:
                     logger.exception("ROI draw failed")
 
+            rule_results = {"alerts": [], "results": {}}
+            if rule_engine and event_results:
+                try:
+                    detections_for_rule = []
+                    for alias_name, alias_result in event_results.items():
+                        for det in alias_result.get("detections", []):
+                            det_obj = dict(det)
+                            det_obj["alias"] = alias_name
+                            det_obj["bbox"] = det.get("xyxy")
+                            det_obj["score"] = det.get("conf", 0.0)
+                            detections_for_rule.append(det_obj)
+                    rule_eval = rule_engine.evaluate(detections_for_rule)
+                    rule_results = {"results": rule_eval, "alerts": _build_rule_alerts(rule_eval)}
+                except Exception:
+                    logger.exception("Rule engine evaluate failed")
+
+            event["rule_results"] = rule_results
+
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
                 job.latest_frame_ts_ms = ts_ms
 
-            # 更新 overlay_path 指向的图片，添加 ROI 绘制
-            for alias_name, alias_result in event_results.items():
-                image_info = alias_result.get("image")
-                if image_info and "overlay_path" in image_info:
-                    overlay_path = image_info["overlay_path"]
-                    try:
-                        # 保存包含 ROI 的 overlay 到同一个路径
-                        cv2.imwrite(overlay_path, overlay)
-                        logger.info("Updated overlay image with ROI at: %s", overlay_path)
-                    except Exception:
-                        logger.exception("Failed to update overlay image with ROI")
+            # 仅在有规则触发时保存 overlay 图
+            if rule_results.get("alerts"):
+                for alias_name, alias_result in event_results.items():
+                    image_info = alias_result.get("image")
+                    if image_info and "overlay_path" in image_info:
+                        overlay_path = image_info["overlay_path"]
+                        try:
+                            cv2.imwrite(overlay_path, overlay)
+                            logger.info("Saved rule-matched overlay image: %s", overlay_path)
+                        except Exception:
+                            logger.exception("Failed to save rule-matched overlay image")
+            else:
+                for alias_name, alias_result in event_results.items():
+                    image_info = alias_result.get("image")
+                    if image_info and "overlay_path" in image_info:
+                        try:
+                            if os.path.exists(image_info["overlay_path"]):
+                                os.remove(image_info["overlay_path"])
+                        except Exception:
+                            logger.exception("Failed to remove non-rule overlay image")
 
             with job.res_lock:
                 job.latest_results = copy.deepcopy(event_results)
+                job.latest_rule_results = copy.deepcopy(rule_results)
 
             try:
                 validate_event(event)
@@ -376,10 +423,37 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         roi_config = roi_config.model_dump()
         logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
+    raw_rules = getattr(req.scenario, "rule_config", None)
+    rule_engine = None
+    rule_meta: Dict[str, Dict[str, str]] = {}
+    if raw_rules:
+        try:
+            compiled_rules = []
+            for item in raw_rules:
+                item_dict = item.model_dump()
+                if not item_dict.get("enabled", True):
+                    continue
+                rule_id = str(item_dict.get("rule_id") or "")
+                expr = item_dict.get("expr") or item_dict.get("conditions")
+                if not rule_id or not expr:
+                    continue
+                compiled_rules.append({"name": rule_id, "expr": expr, "enabled": True})
+                rule_meta[rule_id] = {
+                    "name": item_dict.get("name") or rule_id,
+                    "message": item_dict.get("message") or f"Rule triggered: {rule_id}",
+                }
+            if compiled_rules:
+                rule_engine = RuleEngine(compiled_rules, roi_config=roi_config)
+                logger.info("Rule engine enabled for job %s with %s rules", job_id, len(compiled_rules))
+        except Exception:
+            logger.exception("Failed to initialize RuleEngine, disabling rules")
+            rule_engine = None
+            rule_meta = {}
+
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config),  # 传递 roi_config
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine, rule_meta),
         daemon=True,
     )
     job = job_manager.get_job(job_id)

@@ -45,12 +45,25 @@ class ROIConfig(BaseModel):
     rois: List[ROIItem]
 
 
+class RuleConfigItem(BaseModel):
+    rule_id: str
+    name: Optional[str] = None
+    message: Optional[str] = None
+    enabled: bool = True
+    expr: Optional[Dict[str, Any]] = None
+    conditions: Optional[Dict[str, Any]] = None
+
+
 # ================= 修改 ScenarioSnapshot =================
 
 class ScenarioSnapshot(BaseModel):
     scenario_id: str = Field(..., description="Scenario identifier")
     models: List[ScenarioModel] = Field(..., description="Scenario model snapshots")
     roi_config: Optional[ROIConfig] = None   # 👈 关键新增
+    rule_config: Optional[List[RuleConfigItem]] = Field(
+        default=None,
+        description="Rule engine configuration",
+    )
 
 
 class InferStreamRequest(BaseModel):

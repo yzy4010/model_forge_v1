@@ -29,6 +29,7 @@ class InferenceJob:
     latest_raw_frame_bgr: Optional[Any] = None
     raw_lock: Lock = field(default_factory=Lock)
     latest_results: Optional[Dict[str, Any]] = None
+    latest_rule_results: Optional[Dict[str, Any]] = None
     res_lock: Lock = field(default_factory=Lock)
     grabber_thread: Optional[Thread] = None
 
