@@ -280,9 +280,36 @@ def _run_job(
                     "name": meta.get("name", rid),
                     "message": meta.get("message") or f"Rule triggered: {rid}",
                     "triggered_aliases": detected_aliases,
+                    "condition": meta.get("condition"),
                 }
             )
         return alerts
+
+    def _log_rule_evaluation(rule_eval: Dict[str, bool], event_results: Dict[str, dict]) -> None:
+        if not rule_eval:
+            logger.debug("Rule evaluation skipped or empty rule set")
+            return
+
+        for rid, triggered in rule_eval.items():
+            aliases_for_rule = sorted((rule_aliases or {}).get(rid, set()))
+            satisfied_aliases = []
+            unsatisfied_aliases = []
+            for alias in aliases_for_rule:
+                detected = bool((event_results.get(alias, {}) or {}).get("conclusion", {}).get("detected", False))
+                if detected:
+                    satisfied_aliases.append(alias)
+                else:
+                    unsatisfied_aliases.append(alias)
+
+            meta = (rule_meta or {}).get(rid, {})
+            logger.info(
+                "Rule evaluation rule_id=%s triggered=%s condition=%s matched_models=%s unmatched_models=%s",
+                rid,
+                triggered,
+                meta.get("condition"),
+                satisfied_aliases,
+                unsatisfied_aliases,
+            )
 
     # =================================================
     try:
@@ -351,6 +378,7 @@ def _run_job(
                             det_obj["score"] = det.get("conf", 0.0)
                             detections_for_rule.append(det_obj)
                     rule_eval = rule_engine.evaluate(detections_for_rule)
+                    _log_rule_evaluation(rule_eval, event_results)
                     rule_results = {"results": rule_eval, "alerts": _build_rule_alerts(rule_eval, event_results)}
                 except Exception:
                     logger.exception("Rule engine evaluate failed")
@@ -561,6 +589,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
                 rule_meta[rule_id] = {
                     "name": item_dict.get("name") or rule_id,
                     "message": item_dict.get("message") or f"Rule triggered: {rule_id}",
+                    "condition": expr,
                 }
                 rule_aliases[rule_id] = _extract_triggered_aliases(expr)
             if compiled_rules:
