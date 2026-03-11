@@ -47,22 +47,6 @@ def _draw_rule_alerts(frame, alerts, results):
             )
             y += 26
 
-    detected_aliases = [
-        alias
-        for alias, result in (results or {}).items()
-        if bool((result.get("conclusion") or {}).get("detected", False))
-    ]
-    if detected_aliases:
-        cv2.putText(
-            frame,
-            f"Detected: {', '.join(detected_aliases)}",
-            (10, y),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.65,
-            (255, 255, 0),
-            2,
-            cv2.LINE_AA,
-        )
     return frame
 
 
