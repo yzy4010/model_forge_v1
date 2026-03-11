@@ -23,10 +23,47 @@ class RuleEngine:
         self._roi_index = ROIIndex(roi_config)
         self._compiler = ExpressionCompiler(self._tracking_state, self._roi_index)
 
-        self._compiled: List[tuple[str, Any]] = []
+        self._compiled: List[tuple[str, Mapping[str, Any], set[str], Any]] = []
         for rule in normalize_rules(rules):
-            self._compiled.append((rule.name, self._compiler.compile(rule.expr)))
+            self._compiled.append(
+                (
+                    rule.name,
+                    rule.expr,
+                    self._extract_aliases(rule.expr),
+                    self._compiler.compile(rule.expr),
+                )
+            )
         self._logger.info("RuleEngine initialized with %s compiled rules", len(self._compiled))
+
+    def _extract_aliases(self, expr: Mapping[str, Any]) -> set[str]:
+        aliases: set[str] = set()
+        if not isinstance(expr, Mapping):
+            return aliases
+
+        alias_value = expr.get("alias")
+        if isinstance(alias_value, str) and alias_value.strip():
+            aliases.add(alias_value.strip())
+        elif isinstance(alias_value, (list, tuple, set)):
+            for alias in alias_value:
+                alias_name = str(alias).strip()
+                if alias_name:
+                    aliases.add(alias_name)
+
+        for key in ("and", "or"):
+            for child in expr.get(key, []) or []:
+                if isinstance(child, Mapping):
+                    aliases.update(self._extract_aliases(child))
+
+        child_not = expr.get("not")
+        if isinstance(child_not, Mapping):
+            aliases.update(self._extract_aliases(child_not))
+
+        duration_cfg = expr.get("duration")
+        if isinstance(duration_cfg, Mapping):
+            child = duration_cfg.get("condition") or duration_cfg.get("where")
+            if isinstance(child, Mapping):
+                aliases.update(self._extract_aliases(child))
+        return aliases
 
     def _normalize_detections(self, detections: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
         normalized: List[Dict[str, Any]] = []
@@ -66,9 +103,34 @@ class RuleEngine:
             "tracking_state": self._tracking_state,
         }
         with self._lock:
-            results = {name: bool(pred(ctx)) for name, pred in self._compiled}
-        for rule_id, triggered in results.items():
-            self._logger.debug("Rule evaluated rule_id=%s triggered=%s", rule_id, triggered)
+            results = {}
+            for rule_id, rule_expr, alias_filters, pred in self._compiled:
+                triggered = bool(pred(ctx))
+                results[rule_id] = triggered
+
+                available_aliases = {str(det.get("alias", "")).strip() for det in normalized if det.get("alias")}
+                if alias_filters:
+                    matched_models = sorted(alias for alias in alias_filters if alias in available_aliases)
+                    unmatched_models = sorted(alias for alias in alias_filters if alias not in available_aliases)
+                else:
+                    matched_models = sorted(available_aliases)
+                    unmatched_models = []
+
+                self._logger.info(
+                    "Rule evaluation rule_id=%s triggered=%s condition=%s matched_models=%s unmatched_models=%s",
+                    rule_id,
+                    triggered,
+                    rule_expr,
+                    matched_models,
+                    unmatched_models,
+                )
+                if triggered:
+                    self._logger.info(
+                        "Rule triggered detail rule_id=%s condition=%s target_models=%s",
+                        rule_id,
+                        rule_expr,
+                        matched_models,
+                    )
         self._logger.info(
             "Rule evaluation finished: triggered=%s/%s",
             sum(1 for v in results.values() if v),
