@@ -1,12 +1,7 @@
 #!/usr/bin/env python3
-"""
-ROI 模块初始化文件
-
-导入必要的模块和类
-"""
+"""ROI module exports."""
 
 from app.roi_engine.roi_protocol import ROI, Detection
-from app.roi_engine.geometry_utils import point_in_polygon
-from app.roi_engine.roi_engine import ROIEngine
+from app.roi_engine.roi_engine import ROIEngine, bbox_in_roi, center_in_roi, point_in_polygon
 
-__all__ = ["ROI", "Detection", "point_in_polygon", "ROIEngine"]
+__all__ = ["ROI", "Detection", "ROIEngine", "point_in_polygon", "center_in_roi", "bbox_in_roi"]

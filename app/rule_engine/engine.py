@@ -18,8 +18,8 @@ class RuleEngine:
         self._lock = threading.RLock()
         self._association = AssociationEngine()
         self._tracking_state = TrackStateManager()
-        self._compiler = ExpressionCompiler(self._tracking_state)
         self._roi_index = ROIIndex(roi_config)
+        self._compiler = ExpressionCompiler(self._tracking_state, self._roi_index)
 
         self._compiled: List[tuple[str, Any]] = []
         for rule in normalize_rules(rules):
@@ -38,7 +38,7 @@ class RuleEngine:
                     "bbox": list(bbox),
                     "score": float(det.get("score", 0.0)),
                     "track_id": det.get("track_id"),
-                    "roi_tags": tuple(det.get("roi_tags") or self._roi_index.tags_for_bbox(bbox)),
+                    "roi_tags": tuple(det.get("roi_tags") or (self._roi_index.tags_for_bbox(bbox) if self._roi_index.has_rois else ())),
                 }
             )
         return normalized
@@ -46,8 +46,9 @@ class RuleEngine:
     def process(self, detections: List[Mapping[str, Any]]) -> Dict[str, Any]:
         normalized = self._normalize_detections(detections)
         person_objects = self._association.build_associations(normalized)
-        for person in person_objects:
-            person["roi_tags"] = tuple(self._roi_index.tags_for_bbox(person.get("bbox") or ()))
+        if self._roi_index.has_rois:
+            for person in person_objects:
+                person["roi_tags"] = tuple(self._roi_index.tags_for_bbox(person.get("bbox") or ()))
         self._tracking_state.update(person_objects)
 
         if not self._compiled:
