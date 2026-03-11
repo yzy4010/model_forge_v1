@@ -9,8 +9,8 @@ from app.rule_engine.operators import op_and, op_not, op_or
 
 
 class ExpressionCompiler:
-    def __init__(self, duration_state):
-        self._duration_state = duration_state
+    def __init__(self, tracking_state):
+        self._tracking_state = tracking_state
 
     def compile(self, expr: Mapping[str, Any]):
         if "and" in expr:
@@ -26,5 +26,5 @@ class ExpressionCompiler:
         if "count" in expr:
             return count_condition(expr["count"])
         if "duration" in expr:
-            return duration_condition(expr["duration"], self.compile, self._duration_state)
+            return duration_condition(expr["duration"], self.compile, self._tracking_state)
         raise ValueError(f"Unsupported expression: {expr}")

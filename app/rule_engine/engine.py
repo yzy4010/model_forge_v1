@@ -1,23 +1,24 @@
-"""Industrial-grade rule engine entrypoint."""
+"""RuleEngine V3 entrypoint with association and tracking support."""
 
 from __future__ import annotations
 
 import threading
 from typing import Any, Dict, List, Mapping
 
+from app.rule_engine.association import AssociationEngine
 from app.rule_engine.evaluator import ExpressionCompiler
 from app.rule_engine.roi import ROIIndex
 from app.rule_engine.schema import normalize_rules
-from app.rule_engine.state import DurationState
+from app.rule_engine.tracking_state import TrackStateManager
+from app.rule_engine.utils import normalize_bbox
 
 
 class RuleEngine:
-    """Thread-safe, compiled rule engine with ROI and temporal support."""
-
     def __init__(self, rules: Any, roi_config: Mapping[str, Any] | None = None):
         self._lock = threading.RLock()
-        self._duration_state = DurationState()
-        self._compiler = ExpressionCompiler(self._duration_state)
+        self._association = AssociationEngine()
+        self._tracking_state = TrackStateManager()
+        self._compiler = ExpressionCompiler(self._tracking_state)
         self._roi_index = ROIIndex(roi_config)
 
         self._compiled: List[tuple[str, Any]] = []
@@ -25,22 +26,41 @@ class RuleEngine:
             self._compiled.append((rule.name, self._compiler.compile(rule.expr)))
 
     def _normalize_detections(self, detections: List[Mapping[str, Any]]) -> List[Dict[str, Any]]:
-        out: List[Dict[str, Any]] = []
+        normalized: List[Dict[str, Any]] = []
         for det in detections or []:
-            bbox = det.get("bbox") or det.get("xyxy") or ()
-            roi_tags = tuple(det.get("roi_tags") or self._roi_index.tags_for_bbox(bbox))
-            out.append(
+            alias = str(det.get("alias", "")).strip()
+            bbox = normalize_bbox(det.get("bbox") or det.get("xyxy"))
+            if not alias or bbox is None:
+                continue
+            normalized.append(
                 {
-                    "alias": str(det.get("alias", "")),
-                    "bbox": bbox,
+                    "alias": alias,
+                    "bbox": list(bbox),
                     "score": float(det.get("score", 0.0)),
-                    "roi_tags": roi_tags,
+                    "track_id": det.get("track_id"),
+                    "roi_tags": tuple(det.get("roi_tags") or self._roi_index.tags_for_bbox(bbox)),
                 }
             )
-        return out
+        return normalized
+
+    def process(self, detections: List[Mapping[str, Any]]) -> Dict[str, Any]:
+        normalized = self._normalize_detections(detections)
+        person_objects = self._association.build_associations(normalized)
+        for person in person_objects:
+            person["roi_tags"] = tuple(self._roi_index.tags_for_bbox(person.get("bbox") or ()))
+        self._tracking_state.update(person_objects)
+
+        if not self._compiled:
+            return {"detections": normalized, "person_objects": person_objects, "results": {}}
+
+        ctx = {
+            "detections": normalized,
+            "person_objects": person_objects,
+            "tracking_state": self._tracking_state,
+        }
+        with self._lock:
+            results = {name: bool(pred(ctx)) for name, pred in self._compiled}
+        return {"detections": normalized, "person_objects": person_objects, "results": results}
 
     def evaluate(self, detections: List[Mapping[str, Any]]) -> Dict[str, bool]:
-        normalized = self._normalize_detections(detections)
-        ctx = {"detections": normalized}
-        with self._lock:
-            return {name: bool(pred(ctx)) for name, pred in self._compiled}
+        return dict(self.process(detections).get("results") or {})
