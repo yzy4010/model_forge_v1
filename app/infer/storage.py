@@ -22,3 +22,12 @@ def save_overlay(frame, job_id: str, frame_idx: int, alias: str) -> str:
         raise ValueError(f"Failed to write overlay image to {path}")
 
     return path.as_posix()
+
+
+def save_triggered_image(frame, job_id: str, frame_idx: int, alias: str, output_path: str | None = None) -> str:
+    """Save the frame for a triggered rule and return the persisted path."""
+    path = output_path or save_overlay(frame, job_id, frame_idx, alias)
+    ok = cv2.imwrite(path, frame)
+    if not ok:
+        raise ValueError(f"Failed to write triggered image to {path}")
+    return path

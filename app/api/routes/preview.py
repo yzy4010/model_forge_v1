@@ -32,9 +32,9 @@ def _draw_rule_alerts(frame, alerts, results):
             )
             y += 28
 
-        triggered_aliases = alert.get("triggered_aliases") or []
+        triggered_aliases = [str(alias) for alias in (alert.get("triggered_aliases") or []) if str(alias)]
         if triggered_aliases:
-            alias_line = f"Models: {', '.join(str(alias) for alias in triggered_aliases)}"
+            alias_line = ", ".join(triggered_aliases)
             cv2.putText(
                 frame,
                 alias_line,
