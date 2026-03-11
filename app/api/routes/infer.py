@@ -18,6 +18,7 @@ from app.infer.job import InferenceJob
 from app.infer.job_registry import job_manager
 from app.infer.model_loader import load_models
 from app.infer.push import WebhookSender
+from app.infer.storage import save_overlay
 from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
@@ -154,14 +155,25 @@ def _build_rule_overlay_text(alerts: list[dict], aliases: list[str], event_resul
     lines: list[str] = []
     if alerts:
         lines.extend(str(alert.get("message") or alert.get("rule_id") or "").strip() for alert in alerts)
-    detected_aliases = [
-        alias
-        for alias in aliases
-        if bool((event_results.get(alias, {}) or {}).get("conclusion", {}).get("detected", False))
-    ]
-    if detected_aliases:
-        lines.append(f"Detected: {', '.join(detected_aliases)}")
     return [line for line in lines if line]
+
+
+def _collect_rule_target_aliases(alerts: list[dict], event_results: Dict[str, dict]) -> set[str]:
+    aliases: set[str] = set()
+    for alert in alerts or []:
+        for alias in alert.get("triggered_aliases") or []:
+            if isinstance(alias, str) and alias:
+                aliases.add(alias)
+
+    if aliases:
+        return aliases
+
+    # 没有明确触发别名时，回退到当前帧检测到的模型别名
+    return {
+        alias
+        for alias, result in (event_results or {}).items()
+        if bool((result.get("conclusion") or {}).get("detected", False))
+    }
 
 
 def _draw_rule_info(frame, lines: list[str]):
@@ -339,15 +351,27 @@ def _run_job(
 
             # 仅在有规则触发时保存 overlay 图
             if rule_results.get("alerts"):
-                for alias_name, alias_result in event_results.items():
-                    image_info = alias_result.get("image")
-                    if image_info and "overlay_path" in image_info:
-                        overlay_path = image_info["overlay_path"]
+                target_aliases = _collect_rule_target_aliases(rule_results.get("alerts", []), event_results)
+                for alias_name in sorted(target_aliases):
+                    alias_result = event_results.get(alias_name, {})
+                    image_info = alias_result.get("image") if isinstance(alias_result, dict) else None
+                    overlay_path = image_info.get("overlay_path") if isinstance(image_info, dict) else None
+                    if not overlay_path:
                         try:
-                            cv2.imwrite(overlay_path, overlay)
-                            logger.info("Saved rule-matched overlay image: %s", overlay_path)
+                            overlay_path = save_overlay(overlay, job_id, frame_idx, alias_name)
+                            alias_result["image"] = {
+                                "type": "file",
+                                "overlay_path": overlay_path,
+                            }
                         except Exception:
-                            logger.exception("Failed to save rule-matched overlay image")
+                            logger.exception("Failed to allocate overlay path for rule-matched image")
+                            continue
+
+                    try:
+                        cv2.imwrite(overlay_path, overlay)
+                        logger.info("Saved rule-matched overlay image: %s", overlay_path)
+                    except Exception:
+                        logger.exception("Failed to save rule-matched overlay image")
             else:
                 for alias_name, alias_result in event_results.items():
                     image_info = alias_result.get("image")
