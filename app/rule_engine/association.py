@@ -8,6 +8,16 @@ from typing import Any, Dict, Iterable, List, Mapping, MutableMapping
 from app.rule_engine.utils import compute_iou, normalize_bbox
 
 
+def _bbox_contains_point(bbox: List[float], x: float, y: float) -> bool:
+    x1, y1, x2, y2 = bbox
+    return x1 <= x <= x2 and y1 <= y <= y2
+
+
+def _bbox_center(bbox: List[float]) -> tuple[float, float]:
+    x1, y1, x2, y2 = bbox
+    return (x1 + x2) / 2.0, (y1 + y2) / 2.0
+
+
 class AssociationEngine:
     def __init__(self, iou_threshold: float = 0.3, target_alias: str = "person"):
         self.iou_threshold = float(iou_threshold)
@@ -26,6 +36,7 @@ class AssociationEngine:
                     "bbox": list(bbox),
                     "score": float(det.get("score", 0.0)),
                     "track_id": det.get("track_id"),
+                    "roi_tags": tuple(det.get("roi_tags") or ()),
                 }
             )
         return dict(grouped)
@@ -39,7 +50,15 @@ class AssociationEngine:
         for alias, dets in (objects or {}).items():
             if alias == self.target_alias:
                 continue
-            selected = [dict(det) for det in dets if compute_iou(person_bbox, det.get("bbox")) >= self.iou_threshold]
+            selected = []
+            for det in dets:
+                det_bbox = list(det.get("bbox") or [])
+                if len(det_bbox) != 4:
+                    continue
+                iou = compute_iou(person_bbox, det_bbox)
+                cx, cy = _bbox_center(det_bbox)
+                if iou >= self.iou_threshold or _bbox_contains_point(person_bbox, cx, cy):
+                    selected.append(dict(det))
             if selected:
                 matched[alias] = selected
         return matched
@@ -56,6 +75,7 @@ class AssociationEngine:
                     "track_id": person.get("track_id"),
                     "bbox": bbox,
                     "score": float(person.get("score", 0.0)),
+                    "roi_tags": tuple(person.get("roi_tags") or ()),
                     "objects": self.match_objects(bbox, grouped),
                 }
             )
