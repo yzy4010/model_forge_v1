@@ -39,12 +39,26 @@ def alias_condition(value: str | list[str]):
     return _pred
 
 
-def roi_condition(value: str | list[str]):
+def roi_condition(value: str | list[str], roi_index):
     expected = _as_set(value)
-    return lambda ctx: any(bool(set(person.get("roi_tags") or ()) & expected) for person in ctx.get("person_objects", []))
+
+    def _pred(ctx: Mapping[str, Any]) -> bool:
+        if not expected:
+            return True
+        person_objects = ctx.get("person_objects", [])
+        for person in person_objects:
+            if roi_index is not None and roi_index.has_rois:
+                if roi_index.check_in_roi(person, list(expected)):
+                    return True
+                continue
+            if bool(set(person.get("roi_tags") or ()) & expected):
+                return True
+        return False
+
+    return _pred
 
 
-def count_condition(spec: Mapping[str, Any]):
+def count_condition(spec: Mapping[str, Any], roi_index=None):
     where = spec.get("where", {})
     expected_alias = where.get("alias")
     expected_roi = _as_set(where.get("roi"))
@@ -55,8 +69,13 @@ def count_condition(spec: Mapping[str, Any]):
     def _pred(ctx: Mapping[str, Any]) -> bool:
         count = 0
         for person in ctx.get("person_objects", []):
-            if expected_roi and not (set(person.get("roi_tags") or ()) & expected_roi):
-                continue
+            if expected_roi:
+                if roi_index is not None and roi_index.has_rois:
+                    if not roi_index.check_in_roi(person, list(expected_roi)):
+                        continue
+                elif not (set(person.get("roi_tags") or ()) & expected_roi):
+                    continue
+
             if expected_alias and expected_alias != "person":
                 count += len(person.get("objects", {}).get(expected_alias) or [])
             else:
