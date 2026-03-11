@@ -50,7 +50,11 @@ def _normalize_expr(expr: Mapping[str, Any]) -> Dict[str, Any]:
         return {"or": [_normalize_expr(item) for item in expr["or"]]}
     if "not" in expr and isinstance(expr["not"], Mapping):
         return {"not": _normalize_expr(expr["not"])}
-    return dict(expr)
+
+    leaf = dict(expr)
+    if bool(leaf.pop("not", False)):
+        return {"not": _normalize_expr(leaf)}
+    return leaf
 
 
 def normalize_rules(rules: Any) -> List[Rule]:
