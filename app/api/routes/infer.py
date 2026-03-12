@@ -574,6 +574,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     rule_engine = None
     rule_meta: Dict[str, Dict[str, str]] = {}
     rule_aliases: Dict[str, set[str]] = {}
+    logger.info("Rule 配置接收: Rule config received: %s",raw_rules)
     if raw_rules:
         try:
             compiled_rules = []
@@ -594,7 +595,8 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
                 rule_aliases[rule_id] = _extract_triggered_aliases(expr)
             if compiled_rules:
                 rule_engine = RuleEngine(compiled_rules, roi_config=roi_config)
-                logger.info("Rule engine enabled for job %s with %s rules", job_id, len(compiled_rules))
+                logger.info("任务已启动规则引擎 %s 包含 %s 规则", job_id, len(compiled_rules))
+                logger.info(f"规则详情: {compiled_rules}")
         except Exception:
             logger.exception("Failed to initialize RuleEngine, disabling rules")
             rule_engine = None

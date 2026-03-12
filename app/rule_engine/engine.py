@@ -84,9 +84,8 @@ class RuleEngine:
         return normalized
 
     def process(self, detections: List[Mapping[str, Any]]) -> Dict[str, Any]:
-        self._logger.debug("Start evaluating frame with %s raw detections", len(detections or []))
+        self._logger.debug("开始对包含 %s 个原始检测结果的帧进行评估", len(detections or []))
         normalized = self._normalize_detections(detections)
-        self._logger.debug("Normalized detections count=%s", len(normalized))
         person_objects = self._association.build_associations(normalized)
         if self._roi_index.has_rois:
             for person in person_objects:
