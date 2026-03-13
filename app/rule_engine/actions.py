@@ -1,0 +1,25 @@
+from datetime import datetime
+import logging
+logger = logging.getLogger(__name__)
+
+
+def alert_action(rule_id, event_data, params):
+    # 从 params 获取 JSON 中配置的自定义信息，如果没有则使用默认值
+    # level = params.get("level", "info").upper()
+    # message = params.get("message", "未定义的规则触发")
+
+    level = params.get("level").upper()
+    message = params.get("message")
+
+    print(f"--- [🚨 {level} 告警] ---")
+    print(f"规则 ID: {rule_id}")
+    print(f"告警内容: {message}")
+    print(f"触发时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # 这里可以扩展：发送到钉钉、飞书、或存储到数据库
+
+
+def save_image_action(rule_id, event_data, params):
+    """保存图片动作（待后期补充实现）"""
+    # 暂时只打日志，不执行耗时的 IO 操作
+    logger.warning(f"规则 {rule_id} 触发了 save_image 动作，但功能尚未实现。")
+    return None

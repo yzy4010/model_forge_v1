@@ -22,6 +22,8 @@ from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
 from app.roi_engine.roi_draw import draw_rois
+from app.rule_engine import RuleParser, RuleEngine
+from typing import Any
 
 logger = logging.getLogger("model_forge.infer.routes")
 
@@ -130,7 +132,8 @@ def _run_job(
         models_by_alias: Dict[str, AliasModel],
         aliases: list[str],
         sender: WebhookSender,
-        roi_config: Optional[dict] = None
+        roi_config: Optional[dict] = None,
+        rule_engine: Optional[RuleEngine] = None  # 接收规则引擎
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
@@ -196,6 +199,7 @@ def _run_job(
             # ===========================================
 
             # ================= ROI 应用 =================
+            all_roi_tags = set()  # 记录本帧触发的所有 ROI 标签，用于规则引擎
             if roi_engine and event_results:
                 try:
                     for alias_name, alias_result in event_results.items():
@@ -203,9 +207,46 @@ def _run_job(
                         if detections:
                             processed = roi_engine.apply(detections)
                             alias_result["detections"] = processed
+                            # 收集本帧所有被命中的标签
+                            for det in processed:
+                                tags = det.get("roi_tags", [])
+                                if tags:
+                                    all_roi_tags.update(tags)
                 except Exception:
                     logger.exception("ROI apply failed")
-            # ===========================================
+
+            # ================= 规则引擎评估 (核心修复版) =================
+            if rule_engine:
+                # 明确声明类型，防止 IDE 报 'bool vs list' 警告
+                engine_data: Dict[str, Any] = {
+                    "roi": list(all_roi_tags)
+                }
+
+                # 映射 alias 状态
+                for alias_name, res in event_results.items():
+                    if not res:
+                        engine_data[alias_name] = False
+                        continue
+
+                    # 关键修复：从 conclusion 字段提取 detected 状态
+                    # 因为你的日志显示简化结果中使用了 result.get('conclusion', {}).get('detected')
+                    conclusion = res.get("conclusion", {})
+                    is_detected = conclusion.get("detected")
+
+                    # 如果 conclusion 里拿不到，再尝试直接从第一层拿 (保底逻辑)
+                    if is_detected is None:
+                        is_detected = res.get("detected", False)
+
+                    engine_data[alias_name] = is_detected
+
+                # 执行评估
+                try:
+                    # 只有这里的 engine_data 显示 person: True，规则才会触发
+                    logger.warning("RULE_ENGINE_INPUT -> %s", engine_data)
+                    rule_engine.evaluate_frame(engine_data)
+                except Exception:
+                    logger.exception("Rule engine evaluation failed")
+            # ==========================================================
 
             # 保持原有绘制逻辑
             overlay = draw_alias_detections(frame, event_results)
@@ -349,6 +390,8 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
 
 @router.post("/stream", response_model=InferStartResponse)
 def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
+    # 打印整个模型，查看 rule_config 是否有值
+    logger.info(f"请求数据详情: {req.model_dump()}")
     if not req.rtsp_url:
         raise HTTPException(status_code=400, detail="rtsp_url is required")
 
@@ -359,12 +402,31 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
             "sample_fps": req.sample_fps,
         }
     )
+
     try:
         models_by_alias = _build_models(req, job_id)
         aliases = [model.alias for model in req.scenario.models]
         webhook_url = _resolve_webhook_url()
         logger.warning("WEBHOOK_URL_USED=%s", webhook_url)
         sender = WebhookSender(webhook_url)
+
+        # ================= 规则引擎初始化 =================
+        rule_engine = None
+        # 尝试从 scenario 中获取 rule_config
+        rule_config = getattr(req.scenario, "rule_config", None)
+        logger.info("Rule 配置接收: Rule config received: %s", rule_config)
+        if rule_config:
+            try:
+                # 转换 Pydantic 模型为 dict 列表
+                raw_rules = [r.model_dump() if hasattr(r, "model_dump") else r for r in rule_config]
+                rules = [RuleParser.parse_rule(r) for r in raw_rules if r.get("enabled", True)]
+                if rules:
+                    rule_engine = RuleEngine(rules)
+                    logger.info("Rule engine initialized with %d rules for job %s", len(rules), job_id)
+            except Exception:
+                logger.exception("Failed to initialize Rule engine")
+        # =================================================
+
     except Exception:
         job_manager.stop_job(job_id)
         raise
@@ -374,14 +436,17 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
     logger.info("ROI 配置接收: ROI config received: %s", roi_config)
     if roi_config is not None:
         roi_config = roi_config.model_dump()
-        logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
+        # logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
+
+    # 将 rule_engine 传入 _run_job
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config),  # 传递 roi_config
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine),
         daemon=True,
     )
+
     job = job_manager.get_job(job_id)
     if job is not None:
         job.thread = thread

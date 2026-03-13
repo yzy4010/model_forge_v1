@@ -19,6 +19,19 @@ class ScenarioModel(BaseModel):
     params: InferParams = Field(..., description="Inference parameters")
 
 
+# ================= 新增 Rule 相关结构 =================
+
+class RuleAction(BaseModel):
+    type: str  # 例如: "alert", "save_image"
+    params: Optional[Dict[str, Any]] = None
+
+class RuleItem(BaseModel):
+    rule_id: str
+    name: str
+    enabled: bool = True
+    conditions: Dict[str, Any]  # 支持嵌套的逻辑结构
+    action: RuleAction
+
 # ================= 新增 ROI 结构 =================
 
 class ROIResolution(BaseModel):
@@ -50,7 +63,10 @@ class ROIConfig(BaseModel):
 class ScenarioSnapshot(BaseModel):
     scenario_id: str = Field(..., description="Scenario identifier")
     models: List[ScenarioModel] = Field(..., description="Scenario model snapshots")
-    roi_config: Optional[ROIConfig] = None   # 👈 关键新增
+    roi_config: Optional[ROIConfig] = None
+    rule_config: Optional[List[RuleItem]] = Field(
+        default=None, description="Logical rules for the scenario"
+    )
 
 
 class InferStreamRequest(BaseModel):
