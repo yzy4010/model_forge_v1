@@ -217,6 +217,7 @@ def _run_job(
             # ================= 规则引擎评估 (强绑定修复版) =================
             triggered_rois = set()
             triggered_aliases = set()  # 新增：记录是哪些别名触发了告警
+            active_alerts = []  # 修改点 新增列表，用于存储告警详情
 
             if rule_engine:
                 # 1. 构造“带空间信息”的 engine_data
@@ -261,6 +262,15 @@ def _run_job(
                                 # 提取该规则涉及到的 ROI 标签用于变色
                                 involved = rule.get_involved_rois()
                                 triggered_rois.update(involved)
+
+                                #  修改点：收集准备推送到 Java 端的规则详情
+                                active_alerts.append({
+                                    "rule_id": rule.rule_id,
+                                    "rule_name": getattr(rule, 'name', rule.rule_id),  # 如果 Rule 类有 name 属性
+                                    "message": rule.action_params.get("message", "实时告警"),
+                                    "level": rule.action_params.get("level", "warning")
+                                })
+
                 except Exception:
                     logger.exception("Rule engine evaluation failed")
 
@@ -355,7 +365,22 @@ def _run_job(
             )
             logger.debug("Event results: %s", simplified_results)
 
-            sender.enqueue(event)
+            # ================= 消息推送 =================
+            # 修改点构造包含规则信息的 Payload
+            push_payload = {
+                "job_id": job_id,
+                "scenario_id": job.scenario_id,
+                "frame_idx": frame_idx,
+                "ts_ms": ts_ms,
+                "results": simplified_results,  # 使用你已经简化好的推理结果
+                "triggered_rules": active_alerts,  # 触发的具体规则详情
+                "triggered_rois": list(triggered_rois)  # 触发的 ROI 标签列表
+            }
+
+            # 修改点 推送
+            if sender:
+                # 注意：如果之前用了 validate_event(event)，
+                sender.enqueue(push_payload)
 
             job.frame_idx = frame_idx
             frames_done = frame_idx

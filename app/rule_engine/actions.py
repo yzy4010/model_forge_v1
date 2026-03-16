@@ -19,7 +19,9 @@ def alert_action(rule_id, event_data, params):
 
 
 def save_image_action(rule_id, event_data, params):
-    """保存图片动作（待后期补充实现）"""
+    """保存图片动作"""
+    # 此函数未使用
+    # 功能已实现，在_run_job中直接执行保存逻辑，只保存触发规则的结果图片
     # 暂时只打日志，不执行耗时的 IO 操作
     logger.warning(f"规则 {rule_id} 触发了 save_image 动作，但功能尚未实现。")
     return None
