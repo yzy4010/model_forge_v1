@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Mapping, TypedDict
 
-from app.infer.storage import save_overlay
+from app.infer.storage import get_overlay_path
 from app.infer.visualize import draw_detections
 
 
@@ -190,9 +190,19 @@ def run_frame(
             "conclusion": conclusion,
         }
 
+        # if detected:
+        #     overlay = draw_detections(frame, detections,alias,title=alias)
+        #     overlay_path = save_overlay(overlay, model.job_id, frame_idx, alias)
+        #     alias_result["image"] = EventImage(
+        #         type="file",
+        #         overlay_path=overlay_path,
+        #     )
+
         if detected:
-            overlay = draw_detections(frame, detections,alias,title=alias)
-            overlay_path = save_overlay(overlay, model.job_id, frame_idx, alias)
+            # 仅获取路径字符串，不存盘
+            overlay_path = get_overlay_path(model.job_id, frame_idx, alias)
+
+            # 使用 EventImage 类型进行显式定义
             alias_result["image"] = EventImage(
                 type="file",
                 overlay_path=overlay_path,

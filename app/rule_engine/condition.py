@@ -12,6 +12,12 @@ class BaseCondition:
         """
         return []
 
+    def get_alias_values(self) -> list:
+        """
+        定义空接口，用于提取涉及到的模型别名 (如 'smoking', 'person')。
+        """
+        return []
+
 
 class AtomicCondition(BaseCondition):
     """原子条件：支持 alias 和 roi 的灵活判断"""
@@ -50,6 +56,24 @@ class AtomicCondition(BaseCondition):
             return [self.value]
         return []
 
+    def get_alias_values(self) -> list:
+        """
+        核心逻辑：提取触发该条件的 Key。
+        """
+        # 1. 强绑定模式：self.key 就是 'smoking' 等模型别名
+        if self.operator == "alias_in_roi":
+            return [self.key]
+
+        # 2. 存在性判断模式：self.key 也是模型别名
+        if self.operator == "exists":
+            return [self.key]
+
+        # 3. 纯 ROI 模式：key 是 "roi"，不属于模型别名，返回空
+        if self.key == "roi":
+            return []
+
+        return [self.key]
+
 
 class LogicGroup(BaseCondition):
     """逻辑组：实现嵌套的 AND, OR, NOT"""
@@ -75,4 +99,13 @@ class LogicGroup(BaseCondition):
         values = []
         for c in self.conditions:
             values.extend(c.get_roi_values())
+        return values
+
+    def get_alias_values(self) -> list:
+        """
+        递归获取子条件中所有的别名。
+        """
+        values = []
+        for c in self.conditions:
+            values.extend(c.get_alias_values())
         return values

@@ -216,6 +216,7 @@ def _run_job(
 
             # ================= 规则引擎评估 (强绑定修复版) =================
             triggered_rois = set()
+            triggered_aliases = set()  # 新增：记录是哪些别名触发了告警
 
             if rule_engine:
                 # 1. 构造“带空间信息”的 engine_data
@@ -249,6 +250,12 @@ def _run_job(
                         if getattr(rule, 'enabled', True):
                             # 评估时，AtomicCondition 会去匹配具体的 ROI 标签
                             if rule.root_condition.evaluate(engine_data):
+
+                                # 记录触发了告警的别名 (例如: 'smoking')
+                                # 假设你的 Rule 对象有获取涉及别名的方法，如果没有，我们可以从 condition 里拿
+                                involved_aliases = rule.get_involved_aliases()
+                                triggered_aliases.update(involved_aliases)
+
                                 # 触发告警
                                 rule.action(rule.rule_id, engine_data, rule.action_params)
                                 # 提取该规则涉及到的 ROI 标签用于变色
@@ -281,15 +288,26 @@ def _run_job(
                 job.latest_frame_ts_ms = ts_ms
 
             # 3. 更新物理文件 (overlay_path)
-            for alias_name, alias_result in event_results.items():
-                image_info = alias_result.get("image")
-                if image_info and "overlay_path" in image_info:
-                    overlay_path = image_info["overlay_path"]
-                    try:
-                        cv2.imwrite(overlay_path, overlay)
-                    except Exception:
-                        logger.exception("Failed to update overlay image")
+            # ================= 定向保存部分 =================
+            if len(triggered_rois) > 0:
+                for alias_name in triggered_aliases:
+                    # 只从 event_results 里挑选真正触发了规则的别名进行保存
+                    alias_result = event_results.get(alias_name)
+                    if not alias_result:
+                        continue
 
+                    image_info = alias_result.get("image")
+                    if image_info and "overlay_path" in image_info:
+                        overlay_path = image_info["overlay_path"]
+                        try:
+                            cv2.imwrite(overlay_path, overlay)
+                            logger.info(f"💾 [ALARM_SAVE] 精准保存触发别名图片: {overlay_path}")
+                        except Exception:
+                            logger.exception(f"Failed to save {alias_name}")
+            else:
+                # 可选：如果没触发，可以考虑是否删除旧的本地图片，或者直接跳过（推荐直接跳过）
+                # 无规则，或者保存所以模型推理图片
+                pass
             try:
                 validate_event(event)
             except AssertionError as exc:

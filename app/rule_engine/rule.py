@@ -32,3 +32,11 @@ class Rule:
         if self.root_condition:
             involved.update(self.root_condition.get_roi_values())
         return involved
+
+    # 新增：获取触发该规则涉及的模型别名
+    def get_involved_aliases(self) -> set:
+        involved = set()
+        if self.root_condition:
+            # 调用我们在 Condition 类中新加的 get_alias_values 方法
+            involved.update(self.root_condition.get_alias_values())
+        return involved
