@@ -21,7 +21,7 @@ from app.infer.push import WebhookSender
 from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
-from app.roi_engine.roi_draw import draw_rois
+from app.roi_engine.roi_draw import draw_rois_by_rule
 from app.rule_engine import RuleParser, RuleEngine
 from typing import Any
 
@@ -198,8 +198,8 @@ def _run_job(
             event_results = event.get("results", {}) or {}
             # ===========================================
 
-            # ================= ROI 应用 =================
-            all_roi_tags = set()  # 记录本帧触发的所有 ROI 标签，用于规则引擎
+            # ================= ROI 应用 (保持不变，用于提供基础数据) =================
+            all_roi_tags = set()
             if roi_engine and event_results:
                 try:
                     for alias_name, alias_result in event_results.items():
@@ -207,7 +207,6 @@ def _run_job(
                         if detections:
                             processed = roi_engine.apply(detections)
                             alias_result["detections"] = processed
-                            # 收集本帧所有被命中的标签
                             for det in processed:
                                 tags = det.get("roi_tags", [])
                                 if tags:
@@ -215,67 +214,81 @@ def _run_job(
                 except Exception:
                     logger.exception("ROI apply failed")
 
-            # ================= 规则引擎评估 (核心修复版) =================
+            # ================= 规则引擎评估 (强绑定修复版) =================
+            triggered_rois = set()
+
             if rule_engine:
-                # 明确声明类型，防止 IDE 报 'bool vs list' 警告
+                # 1. 构造“带空间信息”的 engine_data
+                # 以前是 {'smoking': True}, 现在是 {'smoking': ['safe_zone']}
                 engine_data: Dict[str, Any] = {
-                    "roi": list(all_roi_tags)
+                    "roi": list(all_roi_tags)  # 全局命中的所有 ROI 标签
                 }
 
-                # 映射 alias 状态
                 for alias_name, res in event_results.items():
                     if not res:
-                        engine_data[alias_name] = False
+                        engine_data[alias_name] = []
                         continue
 
-                    # 关键修复：从 conclusion 字段提取 detected 状态
-                    # 因为你的日志显示简化结果中使用了 result.get('conclusion', {}).get('detected')
-                    conclusion = res.get("conclusion", {})
-                    is_detected = conclusion.get("detected")
+                    # 提取该别名下【所有检测框】命中的 ROI 标签集合
+                    alias_hit_tags = set()
+                    detections = res.get("detections", [])
+                    for det in detections:
+                        tags = det.get("roi_tags", [])
+                        alias_hit_tags.update(tags)
 
-                    # 如果 conclusion 里拿不到，再尝试直接从第一层拿 (保底逻辑)
-                    if is_detected is None:
-                        is_detected = res.get("detected", False)
+                    # 存入列表，供 AtomicCondition 的 alias_in_roi 操作符使用
+                    engine_data[alias_name] = list(alias_hit_tags)
 
-                    engine_data[alias_name] = is_detected
-
-                # 执行评估
+                # 2. 执行规则评估
                 try:
-                    # 只有这里的 engine_data 显示 person: True，规则才会触发
-                    logger.warning("RULE_ENGINE_INPUT -> %s", engine_data)
-                    rule_engine.evaluate_frame(engine_data)
+                    # 这里的日志会显示精确的绑定关系，例如：'smoking': ['safe_zone']
+                    logger.warning("RULE_ENGINE_INPUT (Strong Bound) -> %s", engine_data)
+
+                    for rule in rule_engine.rules:
+                        # 确保 Rule 类有 enabled 属性
+                        if getattr(rule, 'enabled', True):
+                            # 评估时，AtomicCondition 会去匹配具体的 ROI 标签
+                            if rule.root_condition.evaluate(engine_data):
+                                # 触发告警
+                                rule.action(rule.rule_id, engine_data, rule.action_params)
+                                # 提取该规则涉及到的 ROI 标签用于变色
+                                involved = rule.get_involved_rois()
+                                triggered_rois.update(involved)
                 except Exception:
                     logger.exception("Rule engine evaluation failed")
-            # ==========================================================
 
-            # 保持原有绘制逻辑
+            # ================= 绘制逻辑 (生成用于展示的图片) =================
+            # 先画检测框，再画 ROI
             overlay = draw_alias_detections(frame, event_results)
 
-            # 画 ROI，并根据 roi_tags 判断是否命中
             if roi_config:
                 try:
-                    overlay = draw_rois(overlay, roi_config, event_results)
+                    # 这里使用当前帧计算出的 triggered_rois 进行变色绘制
+                    overlay = draw_rois_by_rule(overlay, roi_config, triggered_rois)
                 except Exception:
                     logger.exception("ROI draw failed")
 
+            # 1. 优先同步结果状态 (供预览接口判断变色)
+            with job.res_lock:
+                job.latest_results = copy.deepcopy(event_results)
+                # 这里的变量名必须与 preview 接口 getattr 的名字完全一致
+                job.latest_triggered_rois = triggered_rois.copy()
+                logger.error(f"DEBUG_SYNC_SAVE: id={id(job)}, rois={job.latest_triggered_rois}")
+
+            # 2. 更新当前展示帧 (已经画好框和变色 ROI 的图片)
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
                 job.latest_frame_ts_ms = ts_ms
 
-            # 更新 overlay_path 指向的图片，添加 ROI 绘制
+            # 3. 更新物理文件 (overlay_path)
             for alias_name, alias_result in event_results.items():
                 image_info = alias_result.get("image")
                 if image_info and "overlay_path" in image_info:
                     overlay_path = image_info["overlay_path"]
                     try:
-                        # 保存包含 ROI 的 overlay 到同一个路径
                         cv2.imwrite(overlay_path, overlay)
-                        logger.info("Updated overlay image with ROI at: %s", overlay_path)
                     except Exception:
-                        logger.exception("Failed to update overlay image with ROI")
-
-            with job.res_lock:
-                job.latest_results = copy.deepcopy(event_results)
+                        logger.exception("Failed to update overlay image")
 
             try:
                 validate_event(event)
