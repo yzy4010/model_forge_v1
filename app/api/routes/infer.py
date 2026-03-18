@@ -65,6 +65,16 @@ def _resolve_webhook_url() -> str:
     return webhook_url
 
 
+def _redact_url(url: str) -> str:
+    if not url:
+        return url
+    # simple redact for scheme://user:pass@
+    try:
+        return url.split("://", 1)[0] + "://***:***@" + url.split("@", 1)[1]
+    except Exception:
+        return url
+
+
 def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
     loaded = load_models(req.scenario.models)
     params_by_alias = {model.alias: model.params for model in req.scenario.models}
@@ -290,7 +300,12 @@ def _run_job(
                 job.latest_results = copy.deepcopy(event_results)
                 # 这里的变量名必须与 preview 接口 getattr 的名字完全一致
                 job.latest_triggered_rois = triggered_rois.copy()
-                logger.error(f"DEBUG_SYNC_SAVE: id={id(job)}, rois={job.latest_triggered_rois}")
+                logger.debug(
+                    "SYNC_SAVE job_id=%s job_obj_id=%s triggered_rois=%s",
+                    job_id,
+                    id(job),
+                    list(job.latest_triggered_rois),
+                )
 
             # 2. 更新当前展示帧 (已经画好框和变色 ROI 的图片)
             with job.frame_lock:
@@ -311,9 +326,9 @@ def _run_job(
                         overlay_path = image_info["overlay_path"]
                         try:
                             cv2.imwrite(overlay_path, overlay)
-                            logger.info(f"💾 [ALARM_SAVE] 精准保存触发别名图片: {overlay_path}")
+                            logger.info("💾 ALARM_SAVE alias=%s overlay_path=%s", alias_name, overlay_path)
                         except Exception:
-                            logger.exception(f"Failed to save {alias_name}")
+                            logger.exception("Failed to save alarm image alias=%s", alias_name)
             else:
                 # 可选：如果没触发，可以考虑是否删除旧的本地图片，或者直接跳过（推荐直接跳过）
                 # 无规则，或者保存所以模型推理图片
@@ -432,8 +447,10 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
             if not ok:
                 time.sleep(0.05)
                 continue
+            ts_ms = int(time.time() * 1000)
             with job.raw_lock:
                 job.latest_raw_frame_bgr = frame
+                job.latest_raw_frame_ts_ms = ts_ms
             now = time.monotonic()
             next_tick = max(next_tick + target_interval, now)
             sleep_for = next_tick - now
@@ -444,10 +461,87 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
         logger.warning("Grabber exit job_id=%s scenario_id=%s", job_id, job.scenario_id)
 
 
+def _preview_encoder_loop(job_id: str) -> None:
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return
+
+    preview_width = int(os.getenv("MODEL_FORGE_PREVIEW_WIDTH", "640") or "640")
+    preview_width = max(160, preview_width)
+    preview_fps = float(os.getenv("MODEL_FORGE_PREVIEW_FPS", "8") or "8")
+    if preview_fps <= 0:
+        preview_fps = 8.0
+    min_interval_s = 1.0 / preview_fps
+    next_at = time.monotonic()
+    quality = int(os.getenv("MODEL_FORGE_PREVIEW_JPEG_QUALITY", "55") or "55")
+    quality = max(30, min(95, quality))
+
+    last_raw_ts_ms = -1
+
+    while not job.stop_event.is_set():
+        now = time.monotonic()
+        if now < next_at:
+            time.sleep(min(0.01, next_at - now))
+            continue
+        next_at = max(next_at + min_interval_s, time.monotonic())
+
+        with job.raw_lock:
+            raw_ts_ms = int(getattr(job, "latest_raw_frame_ts_ms", 0) or 0)
+            raw = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
+
+        if raw is None:
+            continue
+        if raw_ts_ms and raw_ts_ms == last_raw_ts_ms:
+            continue
+        last_raw_ts_ms = raw_ts_ms
+
+        # snapshot inference overlays (cheap locks, avoid deep copy here)
+        with job.res_lock:
+            results = None if job.latest_results is None else dict(job.latest_results)
+            triggered_rois = set(getattr(job, "latest_triggered_rois", set()))
+
+        roi_config = getattr(job, "roi_config", None)
+
+        frame = raw
+        try:
+            if results:
+                frame = draw_alias_detections(frame, results)
+            if roi_config:
+                frame = draw_rois_by_rule(frame, roi_config, triggered_rois)
+        except Exception:
+            logger.exception("Preview overlay draw failed job_id=%s", job_id)
+
+        try:
+            h, w = frame.shape[:2]
+            if w > preview_width:
+                scale = preview_width / w
+                frame = cv2.resize(
+                    frame,
+                    (preview_width, int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, jpg_buf = cv2.imencode(
+                ".jpg",
+                frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+            )
+            if ok:
+                with job.preview_lock:
+                    job.latest_encoded_jpg = jpg_buf.tobytes()
+                    job.latest_encoded_ts_ms = raw_ts_ms
+        except Exception:
+            logger.exception("Preview encode failed job_id=%s", job_id)
+
+
 @router.post("/stream", response_model=InferStartResponse)
 def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
-    # 打印整个模型，查看 rule_config 是否有值
-    logger.info(f"请求数据详情: {req.model_dump()}")
+    logger.info(
+        "INFER_STREAM_START scenario_id=%s models=%s sample_fps=%s rtsp_url=%s",
+        req.scenario.scenario_id,
+        len(req.scenario.models or []),
+        req.sample_fps,
+        _redact_url(req.rtsp_url or ""),
+    )
     if not req.rtsp_url:
         raise HTTPException(status_code=400, detail="rtsp_url is required")
 
@@ -463,14 +557,14 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         models_by_alias = _build_models(req, job_id)
         aliases = [model.alias for model in req.scenario.models]
         webhook_url = _resolve_webhook_url()
-        logger.warning("WEBHOOK_URL_USED=%s", webhook_url)
+        logger.info("WEBHOOK_URL_USED=%s", _redact_url(webhook_url))
         sender = WebhookSender(webhook_url)
 
         # ================= 规则引擎初始化 =================
         rule_engine = None
         # 尝试从 scenario 中获取 rule_config
         rule_config = getattr(req.scenario, "rule_config", None)
-        logger.info("Rule 配置接收: Rule config received: %s", rule_config)
+        logger.info("RULE_CONFIG_RECEIVED enabled=%s", bool(rule_config))
         if rule_config:
             try:
                 # 转换 Pydantic 模型为 dict 列表
@@ -489,7 +583,7 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
 
     # 传递 ROI 配置
     roi_config = getattr(req.scenario, "roi_config", None)  # 从请求中获取 ROI 配置
-    logger.info("ROI 配置接收: ROI config received: %s", roi_config)
+    logger.info("ROI_CONFIG_RECEIVED enabled=%s", roi_config is not None)
     if roi_config is not None:
         roi_config = roi_config.model_dump()
         # logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
@@ -514,6 +608,13 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         )
         job.grabber_thread = grabber_thread
         grabber_thread.start()
+        preview_thread = Thread(
+            target=_preview_encoder_loop,
+            args=(job_id,),
+            daemon=True,
+        )
+        job.preview_thread = preview_thread
+        preview_thread.start()
     thread.start()
 
     return InferStartResponse(job_id=job_id, status="running")

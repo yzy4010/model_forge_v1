@@ -27,10 +27,15 @@ class InferenceJob:
     latest_frame_ts_ms: int = 0
     frame_lock: Lock = field(default_factory=Lock)
     latest_raw_frame_bgr: Optional[Any] = None
+    latest_raw_frame_ts_ms: int = 0
     raw_lock: Lock = field(default_factory=Lock)
     latest_results: Optional[Dict[str, Any]] = None
     res_lock: Lock = field(default_factory=Lock)
     grabber_thread: Optional[Thread] = None
+    latest_encoded_jpg: Optional[bytes] = None
+    latest_encoded_ts_ms: int = 0
+    preview_lock: Lock = field(default_factory=Lock)
+    preview_thread: Optional[Thread] = None
 
     def stop(self) -> None:
         self.stop_event.set()

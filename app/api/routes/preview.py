@@ -2,15 +2,13 @@ from __future__ import annotations
 
 import time
 
-import cv2
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.infer.job_registry import job_manager
-from app.infer.visualize import draw_alias_detections
-from app.roi_engine.roi_draw import draw_rois_by_rule
 import logging
-logger = logging.getLogger(__name__)
+
+logger = logging.getLogger("model_forge.preview")
 
 router = APIRouter(tags=["preview"])
 
@@ -24,61 +22,34 @@ def preview(job_id: str) -> StreamingResponse:
     def gen():
         boundary = b"--frame\r\n"
         last_sent_after_stop = False
+        last_ts_ms = -1
 
         while True:
             if job.stop_event.is_set() and last_sent_after_stop:
                 break
 
-            # 1. 优先获取推理线程已经画好【框+ROI变色】的成品帧
-            with job.frame_lock:
-                frame = (
-                    None if job.latest_frame_bgr is None
-                    else job.latest_frame_bgr.copy()
-                )
+            # 推理线程会预编码最新成品帧到 job.latest_encoded_jpg
+            with job.preview_lock:
+                ts_ms = int(getattr(job, "latest_encoded_ts_ms", 0) or 0)
+                jpg_bytes = job.latest_encoded_jpg
 
-            # 2. 如果推理还没出图，则降级获取原始帧
-            if frame is None:
-                with job.raw_lock:
-                    frame = (
-                        None if job.latest_raw_frame_bgr is None
-                        else job.latest_raw_frame_bgr.copy()
-                    )
-
-            if frame is None:
-                if job.stop_event.is_set(): break
-                time.sleep(0.05)
+            if not jpg_bytes:
+                if job.stop_event.is_set():
+                    break
+                time.sleep(0.02)
                 continue
 
-            # 3. 获取最新的触发状态 (用于双重保险绘制)
-            with job.res_lock:
-                results = {} if job.latest_results is None else dict(job.latest_results)
-                # 核心：获取变色名单
-                triggered_rois = getattr(job, 'latest_triggered_rois', set())
-
-            # 4. 如果读取的是原始帧，需要在此处手动叠加 ROI 状态
-            # (如果读取的是 latest_frame_bgr，这里其实是二次加固)
-            roi_config = getattr(job, 'roi_config', None)
-            if roi_config:
-                try:
-                    frame = draw_rois_by_rule(frame, roi_config, triggered_rois)
-                except Exception:
-                    logger.exception("Preview ROI draw failed")
-
-            # 5. 缩放与编码
-            height, width = frame.shape[:2]
-            if width > 960:
-                scale = 960 / width
-                frame = cv2.resize(frame, (960, int(height * scale)))
-
-            ok, jpg = cv2.imencode(".jpg", frame, [int(cv2.IMWRITE_JPEG_QUALITY), 70])
-            if not ok:
-                time.sleep(0.05)
+            if ts_ms and ts_ms == last_ts_ms:
+                if job.stop_event.is_set():
+                    last_sent_after_stop = True
+                time.sleep(0.01)
                 continue
 
             yield boundary
-            yield b"Content-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
+            yield b"Content-Type: image/jpeg\r\n\r\n" + jpg_bytes + b"\r\n"
 
-            time.sleep(0.1)
+            if ts_ms:
+                last_ts_ms = ts_ms
             if job.stop_event.is_set():
                 last_sent_after_stop = True
 
