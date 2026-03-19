@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import time
 
-import cv2
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
 from app.infer.job_registry import job_manager
-from app.infer.visualize import draw_alias_detections
-from app.roi_engine.roi_draw import draw_rois
+import logging
+
+logger = logging.getLogger("model_forge.preview")
 
 router = APIRouter(tags=["preview"])
 
@@ -22,48 +22,34 @@ def preview(job_id: str) -> StreamingResponse:
     def gen():
         boundary = b"--frame\r\n"
         last_sent_after_stop = False
+        last_ts_ms = -1
+
         while True:
             if job.stop_event.is_set() and last_sent_after_stop:
                 break
 
-            with job.raw_lock:
-                frame = (
-                    None
-                    if job.latest_raw_frame_bgr is None
-                    else job.latest_raw_frame_bgr.copy()
-                )
+            # 推理线程会预编码最新成品帧到 job.latest_encoded_jpg
+            with job.preview_lock:
+                ts_ms = int(getattr(job, "latest_encoded_ts_ms", 0) or 0)
+                jpg_bytes = job.latest_encoded_jpg
 
-            if frame is None:
+            if not jpg_bytes:
                 if job.stop_event.is_set():
                     break
-                time.sleep(0.05)
+                time.sleep(0.02)
                 continue
-            with job.res_lock:
-                results = {} if job.latest_results is None else dict(job.latest_results)
-            frame = draw_alias_detections(frame, results)
-            
-            # 绘制 ROI 区域
-            roi_config = getattr(job, 'roi_config', None)
-            if roi_config:
-                frame = draw_rois(frame, roi_config, results)
-            height, width = frame.shape[:2]
-            if width > 960:
-                scale = 960 / width
-                frame = cv2.resize(frame, (960, int(height * scale)))
 
-            ok, jpg = cv2.imencode(
-                ".jpg",
-                frame,
-                [int(cv2.IMWRITE_JPEG_QUALITY), 70],
-            )
-            if not ok:
-                time.sleep(0.05)
+            if ts_ms and ts_ms == last_ts_ms:
+                if job.stop_event.is_set():
+                    last_sent_after_stop = True
+                time.sleep(0.01)
                 continue
 
             yield boundary
-            yield b"Content-Type: image/jpeg\r\n\r\n" + jpg.tobytes() + b"\r\n"
-            time.sleep(0.1)
+            yield b"Content-Type: image/jpeg\r\n\r\n" + jpg_bytes + b"\r\n"
 
+            if ts_ms:
+                last_ts_ms = ts_ms
             if job.stop_event.is_set():
                 last_sent_after_stop = True
 

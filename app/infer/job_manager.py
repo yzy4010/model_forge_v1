@@ -56,6 +56,7 @@ class JobManager:
             job.status = "stopping"
             thread = job.thread
             grabber_thread = job.grabber_thread
+            preview_thread = job.preview_thread
             sender = job.sender
         if thread is not None:
             thread.join(timeout=3.0)
@@ -65,6 +66,10 @@ class JobManager:
             grabber_thread.join(timeout=2.0)
             alive = grabber_thread.is_alive()
             logger.warning("Stop join job_id=%s grabber_alive=%s", job_id, alive)
+        if preview_thread is not None:
+            preview_thread.join(timeout=2.0)
+            alive = preview_thread.is_alive()
+            logger.warning("Stop join job_id=%s preview_alive=%s", job_id, alive)
         if sender is not None:
             sender.stop(timeout_s=1.0)
         with self._lock:

@@ -21,7 +21,9 @@ from app.infer.push import WebhookSender
 from app.infer.visualize import draw_alias_detections
 from app.roi_engine import ROIEngine
 from typing import Optional
-from app.roi_engine.roi_draw import draw_rois
+from app.roi_engine.roi_draw import draw_rois_by_rule
+from app.rule_engine import RuleParser, RuleEngine
+from typing import Any
 
 logger = logging.getLogger("model_forge.infer.routes")
 
@@ -61,6 +63,16 @@ def _resolve_webhook_url() -> str:
             webhook_url,
         )
     return webhook_url
+
+
+def _redact_url(url: str) -> str:
+    if not url:
+        return url
+    # simple redact for scheme://user:pass@
+    try:
+        return url.split("://", 1)[0] + "://***:***@" + url.split("@", 1)[1]
+    except Exception:
+        return url
 
 
 def _build_models(req: InferStreamRequest, job_id: str) -> Dict[str, AliasModel]:
@@ -130,7 +142,8 @@ def _run_job(
         models_by_alias: Dict[str, AliasModel],
         aliases: list[str],
         sender: WebhookSender,
-        roi_config: Optional[dict] = None
+        roi_config: Optional[dict] = None,
+        rule_engine: Optional[RuleEngine] = None  # 接收规则引擎
 ) -> None:
     job = job_manager.get_job(job_id)
     if job is None:
@@ -195,7 +208,8 @@ def _run_job(
             event_results = event.get("results", {}) or {}
             # ===========================================
 
-            # ================= ROI 应用 =================
+            # ================= ROI 应用 (保持不变，用于提供基础数据) =================
+            all_roi_tags = set()
             if roi_engine and event_results:
                 try:
                     for alias_name, alias_result in event_results.items():
@@ -203,39 +217,122 @@ def _run_job(
                         if detections:
                             processed = roi_engine.apply(detections)
                             alias_result["detections"] = processed
+                            for det in processed:
+                                tags = det.get("roi_tags", [])
+                                if tags:
+                                    all_roi_tags.update(tags)
                 except Exception:
                     logger.exception("ROI apply failed")
-            # ===========================================
 
-            # 保持原有绘制逻辑
+            # ================= 规则引擎评估 (强绑定修复版) =================
+            triggered_rois = set()
+            triggered_aliases = set()  # 新增：记录是哪些别名触发了告警
+            active_alerts = []  # 修改点 新增列表，用于存储告警详情
+
+            if rule_engine:
+                # 1. 构造“带空间信息”的 engine_data
+                # 以前是 {'smoking': True}, 现在是 {'smoking': ['safe_zone']}
+                engine_data: Dict[str, Any] = {
+                    "roi": list(all_roi_tags)  # 全局命中的所有 ROI 标签
+                }
+
+                for alias_name, res in event_results.items():
+                    if not res:
+                        engine_data[alias_name] = []
+                        continue
+
+                    # 提取该别名下【所有检测框】命中的 ROI 标签集合
+                    alias_hit_tags = set()
+                    detections = res.get("detections", [])
+                    for det in detections:
+                        tags = det.get("roi_tags", [])
+                        alias_hit_tags.update(tags)
+
+                    # 存入列表，供 AtomicCondition 的 alias_in_roi 操作符使用
+                    engine_data[alias_name] = list(alias_hit_tags)
+
+                # 2. 执行规则评估
+                try:
+                    # 这里的日志会显示精确的绑定关系，例如：'smoking': ['safe_zone']
+                    logger.warning("RULE_ENGINE_INPUT (Strong Bound) -> %s", engine_data)
+
+                    for rule in rule_engine.rules:
+                        # 确保 Rule 类有 enabled 属性
+                        if getattr(rule, 'enabled', True):
+                            # 评估时，AtomicCondition 会去匹配具体的 ROI 标签
+                            if rule.root_condition.evaluate(engine_data):
+
+                                # 记录触发了告警的别名 (例如: 'smoking')
+                                # 假设你的 Rule 对象有获取涉及别名的方法，如果没有，我们可以从 condition 里拿
+                                involved_aliases = rule.get_involved_aliases()
+                                triggered_aliases.update(involved_aliases)
+
+                                # 触发告警
+                                rule.action(rule.rule_id, engine_data, rule.action_params)
+                                # 提取该规则涉及到的 ROI 标签用于变色
+                                involved = rule.get_involved_rois()
+                                triggered_rois.update(involved)
+
+                                #  修改点：收集准备推送到 Java 端的规则详情
+                                active_alerts.append({
+                                    "rule_id": rule.rule_id,
+                                    "rule_name": getattr(rule, 'name', rule.rule_id),  # 如果 Rule 类有 name 属性
+                                    "message": rule.action_params.get("message", "实时告警"),
+                                    "level": rule.action_params.get("level", "warning")
+                                })
+
+                except Exception:
+                    logger.exception("Rule engine evaluation failed")
+
+            # ================= 绘制逻辑 (生成用于展示的图片) =================
+            # 先画检测框，再画 ROI
             overlay = draw_alias_detections(frame, event_results)
 
-            # 画 ROI，并根据 roi_tags 判断是否命中
             if roi_config:
                 try:
-                    overlay = draw_rois(overlay, roi_config, event_results)
+                    # 这里使用当前帧计算出的 triggered_rois 进行变色绘制
+                    overlay = draw_rois_by_rule(overlay, roi_config, triggered_rois)
                 except Exception:
                     logger.exception("ROI draw failed")
 
+            # 1. 优先同步结果状态 (供预览接口判断变色)
+            with job.res_lock:
+                job.latest_results = copy.deepcopy(event_results)
+                # 这里的变量名必须与 preview 接口 getattr 的名字完全一致
+                job.latest_triggered_rois = triggered_rois.copy()
+                logger.debug(
+                    "SYNC_SAVE job_id=%s job_obj_id=%s triggered_rois=%s",
+                    job_id,
+                    id(job),
+                    list(job.latest_triggered_rois),
+                )
+
+            # 2. 更新当前展示帧 (已经画好框和变色 ROI 的图片)
             with job.frame_lock:
                 job.latest_frame_bgr = overlay
                 job.latest_frame_ts_ms = ts_ms
 
-            # 更新 overlay_path 指向的图片，添加 ROI 绘制
-            for alias_name, alias_result in event_results.items():
-                image_info = alias_result.get("image")
-                if image_info and "overlay_path" in image_info:
-                    overlay_path = image_info["overlay_path"]
-                    try:
-                        # 保存包含 ROI 的 overlay 到同一个路径
-                        cv2.imwrite(overlay_path, overlay)
-                        logger.info("Updated overlay image with ROI at: %s", overlay_path)
-                    except Exception:
-                        logger.exception("Failed to update overlay image with ROI")
+            # 3. 更新物理文件 (overlay_path)
+            # ================= 定向保存部分 =================
+            if len(triggered_rois) > 0:
+                for alias_name in triggered_aliases:
+                    # 只从 event_results 里挑选真正触发了规则的别名进行保存
+                    alias_result = event_results.get(alias_name)
+                    if not alias_result:
+                        continue
 
-            with job.res_lock:
-                job.latest_results = copy.deepcopy(event_results)
-
+                    image_info = alias_result.get("image")
+                    if image_info and "overlay_path" in image_info:
+                        overlay_path = image_info["overlay_path"]
+                        try:
+                            cv2.imwrite(overlay_path, overlay)
+                            logger.info("💾 ALARM_SAVE alias=%s overlay_path=%s", alias_name, overlay_path)
+                        except Exception:
+                            logger.exception("Failed to save alarm image alias=%s", alias_name)
+            else:
+                # 可选：如果没触发，可以考虑是否删除旧的本地图片，或者直接跳过（推荐直接跳过）
+                # 无规则，或者保存所以模型推理图片
+                pass
             try:
                 validate_event(event)
             except AssertionError as exc:
@@ -283,7 +380,22 @@ def _run_job(
             )
             logger.debug("Event results: %s", simplified_results)
 
-            sender.enqueue(event)
+            # ================= 消息推送 =================
+            # 修改点构造包含规则信息的 Payload
+            push_payload = {
+                "job_id": job_id,
+                "scenario_id": job.scenario_id,
+                "frame_idx": frame_idx,
+                "ts_ms": ts_ms,
+                "results": simplified_results,  # 使用你已经简化好的推理结果
+                "triggered_rules": active_alerts,  # 触发的具体规则详情
+                "triggered_rois": list(triggered_rois)  # 触发的 ROI 标签列表
+            }
+
+            # 修改点 推送
+            if sender:
+                # 注意：如果之前用了 validate_event(event)，
+                sender.enqueue(push_payload)
 
             job.frame_idx = frame_idx
             frames_done = frame_idx
@@ -335,8 +447,10 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
             if not ok:
                 time.sleep(0.05)
                 continue
+            ts_ms = int(time.time() * 1000)
             with job.raw_lock:
                 job.latest_raw_frame_bgr = frame
+                job.latest_raw_frame_ts_ms = ts_ms
             now = time.monotonic()
             next_tick = max(next_tick + target_interval, now)
             sleep_for = next_tick - now
@@ -347,8 +461,87 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
         logger.warning("Grabber exit job_id=%s scenario_id=%s", job_id, job.scenario_id)
 
 
+def _preview_encoder_loop(job_id: str) -> None:
+    job = job_manager.get_job(job_id)
+    if job is None:
+        return
+
+    preview_width = int(os.getenv("MODEL_FORGE_PREVIEW_WIDTH", "640") or "640")
+    preview_width = max(160, preview_width)
+    preview_fps = float(os.getenv("MODEL_FORGE_PREVIEW_FPS", "8") or "8")
+    if preview_fps <= 0:
+        preview_fps = 8.0
+    min_interval_s = 1.0 / preview_fps
+    next_at = time.monotonic()
+    quality = int(os.getenv("MODEL_FORGE_PREVIEW_JPEG_QUALITY", "55") or "55")
+    quality = max(30, min(95, quality))
+
+    last_raw_ts_ms = -1
+
+    while not job.stop_event.is_set():
+        now = time.monotonic()
+        if now < next_at:
+            time.sleep(min(0.01, next_at - now))
+            continue
+        next_at = max(next_at + min_interval_s, time.monotonic())
+
+        with job.raw_lock:
+            raw_ts_ms = int(getattr(job, "latest_raw_frame_ts_ms", 0) or 0)
+            raw = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
+
+        if raw is None:
+            continue
+        if raw_ts_ms and raw_ts_ms == last_raw_ts_ms:
+            continue
+        last_raw_ts_ms = raw_ts_ms
+
+        # snapshot inference overlays (cheap locks, avoid deep copy here)
+        with job.res_lock:
+            results = None if job.latest_results is None else dict(job.latest_results)
+            triggered_rois = set(getattr(job, "latest_triggered_rois", set()))
+
+        roi_config = getattr(job, "roi_config", None)
+
+        frame = raw
+        try:
+            if results:
+                frame = draw_alias_detections(frame, results)
+            if roi_config:
+                frame = draw_rois_by_rule(frame, roi_config, triggered_rois)
+        except Exception:
+            logger.exception("Preview overlay draw failed job_id=%s", job_id)
+
+        try:
+            h, w = frame.shape[:2]
+            if w > preview_width:
+                scale = preview_width / w
+                frame = cv2.resize(
+                    frame,
+                    (preview_width, int(h * scale)),
+                    interpolation=cv2.INTER_AREA,
+                )
+            ok, jpg_buf = cv2.imencode(
+                ".jpg",
+                frame,
+                [int(cv2.IMWRITE_JPEG_QUALITY), quality],
+            )
+            if ok:
+                with job.preview_lock:
+                    job.latest_encoded_jpg = jpg_buf.tobytes()
+                    job.latest_encoded_ts_ms = raw_ts_ms
+        except Exception:
+            logger.exception("Preview encode failed job_id=%s", job_id)
+
+
 @router.post("/stream", response_model=InferStartResponse)
 def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
+    logger.info(
+        "INFER_STREAM_START scenario_id=%s models=%s sample_fps=%s rtsp_url=%s",
+        req.scenario.scenario_id,
+        len(req.scenario.models or []),
+        req.sample_fps,
+        _redact_url(req.rtsp_url or ""),
+    )
     if not req.rtsp_url:
         raise HTTPException(status_code=400, detail="rtsp_url is required")
 
@@ -359,29 +552,51 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
             "sample_fps": req.sample_fps,
         }
     )
+
     try:
         models_by_alias = _build_models(req, job_id)
         aliases = [model.alias for model in req.scenario.models]
         webhook_url = _resolve_webhook_url()
-        logger.warning("WEBHOOK_URL_USED=%s", webhook_url)
+        logger.info("WEBHOOK_URL_USED=%s", _redact_url(webhook_url))
         sender = WebhookSender(webhook_url)
+
+        # ================= 规则引擎初始化 =================
+        rule_engine = None
+        # 尝试从 scenario 中获取 rule_config
+        rule_config = getattr(req.scenario, "rule_config", None)
+        logger.info("RULE_CONFIG_RECEIVED enabled=%s", bool(rule_config))
+        if rule_config:
+            try:
+                # 转换 Pydantic 模型为 dict 列表
+                raw_rules = [r.model_dump() if hasattr(r, "model_dump") else r for r in rule_config]
+                rules = [RuleParser.parse_rule(r) for r in raw_rules if r.get("enabled", True)]
+                if rules:
+                    rule_engine = RuleEngine(rules)
+                    logger.info("Rule engine initialized with %d rules for job %s", len(rules), job_id)
+            except Exception:
+                logger.exception("Failed to initialize Rule engine")
+        # =================================================
+
     except Exception:
         job_manager.stop_job(job_id)
         raise
 
     # 传递 ROI 配置
     roi_config = getattr(req.scenario, "roi_config", None)  # 从请求中获取 ROI 配置
-    logger.info("ROI 配置接收: ROI config received: %s", roi_config)
+    logger.info("ROI_CONFIG_RECEIVED enabled=%s", roi_config is not None)
     if roi_config is not None:
         roi_config = roi_config.model_dump()
-        logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
+        # logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
     sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
+
+    # 将 rule_engine 传入 _run_job
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config),  # 传递 roi_config
+        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine),
         daemon=True,
     )
+
     job = job_manager.get_job(job_id)
     if job is not None:
         job.thread = thread
@@ -393,6 +608,13 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         )
         job.grabber_thread = grabber_thread
         grabber_thread.start()
+        preview_thread = Thread(
+            target=_preview_encoder_loop,
+            args=(job_id,),
+            daemon=True,
+        )
+        job.preview_thread = preview_thread
+        preview_thread.start()
     thread.start()
 
     return InferStartResponse(job_id=job_id, status="running")
