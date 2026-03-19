@@ -10,11 +10,15 @@ def alert_action(rule_id, event_data, params):
 
     level = params.get("level").upper()
     message = params.get("message")
+    logger.debug(f"[{level} 告警] {message}")
+    logger.debug(f"规则 ID: {rule_id}")
+    logger.debug(f"告警内容: {message}")
+    logger.debug(f"触发时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 
-    print(f"--- [🚨 {level} 告警] ---")
-    print(f"规则 ID: {rule_id}")
-    print(f"告警内容: {message}")
-    print(f"触发时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    # print(f"--- [🚨 {level} 告警] ---")
+    # print(f"规则 ID: {rule_id}")
+    # print(f"告警内容: {message}")
+    # print(f"触发时间: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     # 这里可以扩展：发送到钉钉、飞书、或存储到数据库
 
 
