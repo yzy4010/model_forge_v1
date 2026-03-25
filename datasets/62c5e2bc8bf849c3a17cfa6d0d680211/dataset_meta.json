@@ -1,0 +1,20 @@
+{
+  "dataset_id": "62c5e2bc8bf849c3a17cfa6d0d680211",
+  "name": "smoking_v3",
+  "root_dir": "D:\\projects\\smoking.v3i.yolov8",
+  "data_yaml_source_path": "D:\\projects\\smoking.v3i.yolov8\\data.yaml",
+  "resolved_data_yaml_path": "D:\\projects\\model_forge_v1\\datasets\\62c5e2bc8bf849c3a17cfa6d0d680211\\resolved_data.yaml",
+  "stats": {
+    "nc": 1,
+    "names": [
+      "smoking"
+    ],
+    "train_images": 291,
+    "valid_images": 61,
+    "test_images": 41,
+    "train_labels": 291,
+    "valid_labels": 61,
+    "test_labels": 41
+  },
+  "created_at": "2026-01-28T05:35:03.305282+00:00"
+}

@@ -1,0 +1,6 @@
+train: D:/projects/smoking.v3i.yolov8/train/images
+val: D:/projects/smoking.v3i.yolov8/valid/images
+nc: 1
+names:
+- smoking
+test: D:/projects/smoking.v3i.yolov8/test/images
