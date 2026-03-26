@@ -26,6 +26,8 @@ from app.schemas.train import (
     YoloTrainNewRequest,
     YoloTrainRequest,
 )
+from app.infer.push.socket_manager import socket_manager
+import asyncio
 from app.api.routes.infer import router as infer_router
 from app.api.routes.preview import router as preview_router
 from app.services.job_store import job_store
@@ -40,6 +42,16 @@ logging.basicConfig(
 )
 
 app = FastAPI(title="ModelForge v1")
+
+@app.on_event("startup")
+async def startup_event():
+    # 这一行非常关键！
+    # 它获取了 FastAPI 运行的主异步循环 (Main Event Loop)
+    # 并将其存入我们单例的 socket_manager 中，供推理线程使用。
+    socket_manager.loop = asyncio.get_running_loop()
+    # print("✅ FastAPI 主事件循环已捕获，SocketIO 跨线程准备就绪")
+
+socket_manager.mount_to_fastapi(app)
 app.include_router(infer_router)
 app.include_router(preview_router)
 

@@ -24,7 +24,8 @@ from typing import Optional
 from app.roi_engine.roi_draw import draw_rois_by_rule
 from app.rule_engine import RuleParser, RuleEngine
 from typing import Any
-
+import asyncio
+from app.infer.push.socket_manager import socket_manager
 logger = logging.getLogger("model_forge.infer.routes")
 
 router = APIRouter(prefix="/infer", tags=["infer"])
@@ -396,6 +397,29 @@ def _run_job(
             if sender:
                 # 注意：如果之前用了 validate_event(event)，
                 sender.enqueue(push_payload)
+
+            # === SocketIO 推送开始 ===
+            try:
+                # 尝试获取 socket_manager 绑定的主 loop
+                # 如果你在 startup 没存，可以尝试用 asyncio.get_event_loop()
+                # 但在多线程下，最好是通过单例传递过来的 loop
+                main_loop = getattr(socket_manager, 'loop', None)
+
+                if main_loop and main_loop.is_running():
+                    asyncio.run_coroutine_threadsafe(
+                        socket_manager.emit_event("inference_update", push_payload, room=job_id),
+                        main_loop
+                    )
+                    # 修改后（测试用）：去掉 room 参数，直接广播给所有人
+                    # asyncio.run_coroutine_threadsafe(
+                    #     socket_manager.emit_event("inference_update", push_payload),
+                    #     main_loop
+                    # )
+                else:
+                    # 如果这里报错，说明 startup_event 没跑或者没存上 loop
+                    logger.error("❌ 未找到主事件循环，无法推送 SocketIO 消息")
+            except Exception as e:
+                logger.error(f"SocketIO 跨线程推送失败: {e}")
 
             job.frame_idx = frame_idx
             frames_done = frame_idx
