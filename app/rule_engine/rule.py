@@ -2,8 +2,17 @@ import time
 
 
 class Rule:
-    def __init__(self, rule_id: str, root_condition, action, action_params=None, enabled=True):
+    def __init__(
+        self,
+        rule_id: str,
+        root_condition,
+        action,
+        action_params=None,
+        enabled=True,
+        name=None,
+    ):
         self.rule_id = rule_id
+        self.name = name or rule_id
         self.root_condition = root_condition
         self.action = action
         self.action_params = action_params or {}

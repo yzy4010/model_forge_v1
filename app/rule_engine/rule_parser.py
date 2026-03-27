@@ -54,6 +54,7 @@ class RuleParser:
     @classmethod
     def parse_rule(cls, rule_dict: dict) -> Rule:
         rule_id = rule_dict.get("rule_id", "R_UNKNOWN")
+        rule_name = rule_dict.get("name")
 
         enabled = rule_dict.get("enabled", True)  # 获取 JSON 中的 enabled 状态
 
@@ -69,6 +70,7 @@ class RuleParser:
 
         return Rule(
             rule_id=rule_id,
+            name=rule_name,
             root_condition=root_cond,
             action=action_func,
             action_params=action_params,  # 修正：只传 params 字典

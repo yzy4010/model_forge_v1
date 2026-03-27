@@ -273,11 +273,12 @@ def _run_job(
                                 # 提取该规则涉及到的 ROI 标签用于变色
                                 involved = rule.get_involved_rois()
                                 triggered_rois.update(involved)
+                                rule_name = getattr(rule, "name", None) or rule.rule_id
 
                                 #  修改点：收集准备推送到 Java 端的规则详情
                                 active_alerts.append({
                                     "rule_id": rule.rule_id,
-                                    "rule_name": getattr(rule, 'name', rule.rule_id),  # 如果 Rule 类有 name 属性
+                                    "rule_name": rule_name,
                                     "message": rule.action_params.get("message", "实时告警"),
                                     "level": rule.action_params.get("level", "warning")
                                 })
