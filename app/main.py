@@ -35,6 +35,13 @@ from app.services.meta import utc_now_iso, write_meta
 from app.services.yolo_presets import resolve_augment_params, supports_freeze_param
 from app.trainers.yolo_ultralytics import run_yolo_train
 
+from fastapi.middleware.cors import CORSMiddleware
+
+origins = [
+"http://localhost",
+"http://localhost:8082"
+]
+
 # 配置日志
 logging.basicConfig(
     level=logging.DEBUG,
@@ -54,6 +61,15 @@ async def startup_event():
 socket_manager.mount_to_fastapi(app)
 app.include_router(infer_router)
 app.include_router(preview_router)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 MODEL_SPEC_WEIGHTS = {
@@ -975,3 +991,20 @@ def get_train_result(job_id: str) -> dict:
         "created_at": meta.get("created_at"),
         "finished_at": meta.get("finished_at"),
     }
+
+
+from app.api.routes import modelRoute,RoiConfigRoute,RuleConfigRoute
+
+app.include_router(modelRoute.model_router)
+app.include_router(RoiConfigRoute.RoiConfigServer_Router)
+app.include_router(RuleConfigRoute.RuleConfig_Router)
+
+
+
+from app.api.routes import SceneConfigRoute,SceneModelConfigRoute,SceneRoiConfigRoute,SceneRuleConfigRoute
+
+app.include_router(SceneConfigRoute.SceneConfig_Router)
+app.include_router(SceneModelConfigRoute.SceneModelConfig_Router)
+app.include_router(SceneRoiConfigRoute.SceneRoiConfig_Router)
+app.include_router(SceneRuleConfigRoute.SceneRuleConfig_Route)
+
