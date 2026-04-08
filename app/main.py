@@ -37,6 +37,13 @@ from app.trainers.yolo_ultralytics import run_yolo_train
 
 from fastapi.middleware.cors import CORSMiddleware
 
+import sys
+from pathlib import Path
+
+LEGACY_ROOT = Path(__file__).resolve().parent / "services" / "video_stream_legacy"
+if str(LEGACY_ROOT) not in sys.path:
+    sys.path.insert(0, str(LEGACY_ROOT))
+
 origins = [
 "http://localhost",
 "http://localhost:8082"
@@ -1007,4 +1014,9 @@ app.include_router(SceneConfigRoute.SceneConfig_Router)
 app.include_router(SceneModelConfigRoute.SceneModelConfig_Router)
 app.include_router(SceneRoiConfigRoute.SceneRoiConfig_Router)
 app.include_router(SceneRuleConfigRoute.SceneRuleConfig_Route)
+
+
+from app.api.fjy_infer.infer_runner_api import router as infer_runner_router
+
+app.include_router(infer_runner_router)
 

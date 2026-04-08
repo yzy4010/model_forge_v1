@@ -10,11 +10,17 @@ import numpy as np
 # password = '123456'
 # database = 'deepcarft'
 
+# host = '121.237.177.224'
+# port = 3306
+# user = 'eims'
+# password = 'Dcom123456'
+# database = 'actioncheck_ai'
+
 host = '121.237.177.224'
 port = 3306
 user = 'eims'
 password = 'Dcom123456'
-database = 'actioncheck_ai'
+database = 'fjy-ai-177'
 
 # 创建连接池
 pool = PooledDB(

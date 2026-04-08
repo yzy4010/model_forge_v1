@@ -26,6 +26,8 @@ from app.rule_engine import RuleParser, RuleEngine
 from typing import Any
 import asyncio
 from app.infer.push.socket_manager import socket_manager
+from app.api.services.SceneConfigServer import scene_config_db
+
 logger = logging.getLogger("model_forge.infer.routes")
 
 router = APIRouter(prefix="/infer", tags=["infer"])
@@ -651,6 +653,12 @@ def stop_infer_stream(job_id: str) -> dict:
         snapshot = job_manager.stop_job(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="job not found")
+    try:
+        rows = scene_config_db.mark_stopped_by_job_id(job_id)
+        if rows:
+            logger.info("scene_configs status=0 by job_id=%s rows=%s", job_id, rows)
+    except Exception as e:
+        logger.warning("scene_configs 按 job_id 更新 status=0 失败 job_id=%s: %s", job_id, e)
     return {
         "job_id": snapshot["job_id"],
         "status": snapshot["status"],

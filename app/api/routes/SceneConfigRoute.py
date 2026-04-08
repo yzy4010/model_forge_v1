@@ -265,6 +265,16 @@ async def post_scene_full_config_and_start_infer(scene_id: str):
         infer_info = _start_infer_after_full_config(data)
         # 根级 job_id：与 POST /infer/stream 对齐，避免前端只读根对象时拿不到
         job_id = infer_info.get("job_id")
+        if infer_info.get("started") and job_id:
+            try:
+                scene_config_db.update_scene_infer_state(scene_id, str(job_id), 1)
+            except Exception as ex:
+                logger.warning(
+                    "scene_configs 写入 job_id/status 失败 scene_id=%s job_id=%s: %s",
+                    scene_id,
+                    job_id,
+                    ex,
+                )
         return JSONResponse(
             content={
                 "code": 200,
@@ -343,17 +353,31 @@ def get_scene_config(scene_id: str):
         return JSONResponse(status_code=500, content={"code": 500, "msg": f"场景查询失败: {e}"})
 
 
+def _normalize_scene_list_item(row: dict) -> dict:
+    """列表项中与 scene_configs 表对齐：保证含 status（0 未运行，1 运行中）、job_id。"""
+    out = dict(row)
+    try:
+        st = out.get("status")
+        out["status"] = int(st) if st is not None else 0
+    except (TypeError, ValueError):
+        out["status"] = 0
+    if "job_id" not in out:
+        out["job_id"] = None
+    return out
+
+
 @SceneConfig_Router.get("/scenes")
 def list_scene_configs(page: int = Query(1, gt=0), page_size: int = Query(10, gt=0, le=100)):
     """
-    分页查询推理场景主配置列表
+    分页查询推理场景主配置列表。
+    每条记录含表字段：含 status（0 未运行，1 运行中）、job_id 等（见 scene_configs）。
     """
     try:
         all_scenes = scene_config_db.list_scene_configs() or []
         total = len(all_scenes)
         start = (page - 1) * page_size
         end = start + page_size
-        scenes = all_scenes[start:end]
+        scenes = [_normalize_scene_list_item(s) for s in all_scenes[start:end]]
         return JSONResponse(content={
             "code": 200,
             "data": scenes,

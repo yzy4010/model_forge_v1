@@ -26,16 +26,43 @@ class JobManager:
         self._jobs: Dict[str, InferenceJob] = {}
         self._lock = Lock()
 
+    @staticmethod
+    def _require_scenario_id(raw: Optional[str]) -> str:
+        if raw is None:
+            raise HTTPException(status_code=400, detail="scenario_id is required")
+        s = str(raw).strip()
+        if not s:
+            raise HTTPException(status_code=400, detail="scenario_id is required")
+        return s
+
+    def _scenario_has_active_infer(self, scenario_id: str) -> bool:
+        """同一 scenario 在 running 或 stopping 时视为占用，阻塞再启。"""
+        for job in self._jobs.values():
+            sid = job.scenario_id
+            if sid is None:
+                continue
+            if str(sid).strip() != scenario_id:
+                continue
+            if job.status in ("running", "stopping"):
+                return True
+        return False
+
     def start_job(self, req: Any) -> str:
         with self._lock:
-            running_job = self._get_running_job()
-            if running_job is not None:
-                raise HTTPException(status_code=409, detail="inference job already running")
             payload = self._normalize_payload(req)
+            scenario_id = self._require_scenario_id(payload.scenario_id)
+            if self._scenario_has_active_infer(scenario_id):
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"scenario '{scenario_id}' already has an active inference job "
+                        "(running or stopping); wait for it to finish or stop it first"
+                    ),
+                )
             job_id = uuid4().hex
             self._jobs[job_id] = InferenceJob(
                 job_id=job_id,
-                scenario_id=payload.scenario_id,
+                scenario_id=scenario_id,
                 rtsp_url=payload.rtsp_url,
                 sample_fps=payload.sample_fps,
                 status="running",
@@ -83,12 +110,6 @@ class JobManager:
     def get_job(self, job_id: str) -> Optional[InferenceJob]:
         with self._lock:
             return self._jobs.get(job_id)
-
-    def _get_running_job(self) -> Optional[InferenceJob]:
-        for job in self._jobs.values():
-            if job.is_running():
-                return job
-        return None
 
     @staticmethod
     def _normalize_payload(req: Any) -> JobRequestPayload:
