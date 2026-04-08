@@ -16,11 +16,17 @@ import numpy as np
 # password = 'Dcom123456'
 # database = 'actioncheck_ai'
 
-host = '121.237.177.224'
+# host = '121.237.177.224'
+# port = 3306
+# user = 'eims'
+# password = 'Dcom123456'
+# database = 'fjy-ai-177'
+
+host = '192.168.1.11'
 port = 3306
-user = 'eims'
-password = 'Dcom123456'
-database = 'fjy-ai-177'
+user = 'root'
+password = 'Agile@123456'
+database = 'fjy_ai'
 
 # 创建连接池
 pool = PooledDB(
