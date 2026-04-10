@@ -1,4 +1,5 @@
 import platform
+import shutil
 import threading, time, uuid, os, subprocess, cv2, torch, json, re
 from collections import deque
 
@@ -72,18 +73,74 @@ color_palette = {
 }
 
 task_manager = ThreadTaskManager(max_workers=30, thread_name_prefix="process")
-osName = platform.system().lower()
-# 设置环境变量启用FFmpeg日志
+
+# ----- 运行平台：自动识别 Windows / Linux / macOS / 其他 -----
+_os_sys = platform.system().lower()
+if _os_sys == "windows":
+    OS_KIND = "windows"
+elif _os_sys == "linux":
+    OS_KIND = "linux"
+elif _os_sys == "darwin":
+    OS_KIND = "darwin"
+else:
+    OS_KIND = _os_sys
+
+IS_WINDOWS = OS_KIND == "windows"
+IS_LINUX = OS_KIND == "linux"
+IS_MACOS = OS_KIND == "darwin"
+# 兼容历史变量名（本文件内多处使用）
+osName = OS_KIND
+
+
+def _ffmpeg_use_nvenc() -> bool:
+    """是否使用 NVIDIA NVENC；无 CUDA 或环境关闭时用 CPU libx264（各系统一致）。"""
+    if os.getenv("MODEL_FORGE_FFMPEG_NVENC", "1").strip().lower() in (
+        "0",
+        "false",
+        "no",
+        "off",
+    ):
+        return False
+    return bool(torch.cuda.is_available())
+
+
+def _resolve_imageio_ffmpeg_exe() -> None:
+    """按系统为 imageio 设置 ffmpeg 可执行文件路径。"""
+    if IS_WINDOWS:
+        for p in (
+            r"C:\Tools\ffmpeg\bin\ffmpeg.exe",
+            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
+        ):
+            if os.path.isfile(p):
+                os.environ["IMAGEIO_FFMPEG_EXE"] = p
+                return
+        found = shutil.which("ffmpeg")
+        if found:
+            os.environ["IMAGEIO_FFMPEG_EXE"] = found
+        return
+    if IS_LINUX:
+        os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
+        return
+    if IS_MACOS:
+        for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg"):
+            if os.path.isfile(p):
+                os.environ["IMAGEIO_FFMPEG_EXE"] = p
+                return
+        found = shutil.which("ffmpeg")
+        if found:
+            os.environ["IMAGEIO_FFMPEG_EXE"] = found
+        return
+    found = shutil.which("ffmpeg")
+    if found:
+        os.environ["IMAGEIO_FFMPEG_EXE"] = found
+    else:
+        os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
+
+
+# 设置环境变量启用 FFmpeg 日志
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "loglevel;verbose"
 os.environ["OPENCV_LOG_LEVEL"] = "DEBUG"
-if osName == "windows":
-    # C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe
-    # os.environ["IMAGEIO_FFMPEG_EXE"] = "D:\\FFmpeg\\ffmpeg-7.1-essentials_build\\ffmpeg-7.1-essentials_build\\bin\\ffmpeg.exe"
-    os.environ["IMAGEIO_FFMPEG_EXE"] = "C:\\Tools\\ffmpeg\\bin\\ffmpeg.exe"
-elif osName == "linux":
-    os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
-else:
-    os.environ["IMAGEIO_FFMPEG_EXE"] = "/usr/bin/ffmpeg"
+_resolve_imageio_ffmpeg_exe()
 
 
 class FFmpegErrorCatcher:
@@ -220,7 +277,22 @@ class FrameBuffer:
             begin_frame_num = max(0, begin_frame_num - begin_last_num)
             end_frame_num = min(end_frame_num + end_delay_num + out_fps, lenthThis - 1)
             try:
-                if osName == "windows":
+                if _ffmpeg_use_nvenc():
+                    with imageio.get_writer(
+                            outPath,
+                            fps=out_fps,
+                            codec="h264_nvenc",
+                            pixelformat="yuv420p",
+                            output_params=[
+                                '-cq', '30',
+                                '-preset', 'p1'
+                            ]
+                    ) as writer:
+                        for i in range(begin_frame_num, end_frame_num):
+                            (frame, formatted_time) = self.buffer[i]
+                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            writer.append_data(rgb_frame)
+                else:
                     with imageio.get_writer(
                             outPath,
                             fps=out_fps,
@@ -233,26 +305,7 @@ class FrameBuffer:
                                 '-movflags', '+faststart'  # Web优化：立即播放
                             ]
                     ) as writer:
-                        # print("outPath:",outPath)
                         for i in range(begin_frame_num, end_frame_num):
-                            # print("save_frames_as_video:",i)
-                            (frame, formatted_time) = self.buffer[i]
-                            rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            writer.append_data(rgb_frame)
-                else:
-                    with imageio.get_writer(
-                            outPath,
-                            fps=out_fps,
-                            codec="h264_nvenc",
-                            pixelformat="yuv420p",
-                            output_params=[
-                                '-cq', '30',
-                                '-preset', 'p1'
-                            ]
-                    ) as writer:
-                        # print("outPath:",outPath)
-                        for i in range(begin_frame_num, end_frame_num):
-                            # print("save_frames_as_video:",i)
                             (frame, formatted_time) = self.buffer[i]
                             rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                             writer.append_data(rgb_frame)
@@ -298,7 +351,21 @@ class SaveMixVideos():
     
     def SaveFramesAsVideo(self):
         try:
-            if osName == "windows":
+            if _ffmpeg_use_nvenc():
+                with imageio.get_writer(
+                        self.outPath,
+                        fps=out_fps,
+                        codec="h264_nvenc",
+                        pixelformat="yuv420p",
+                        output_params=[
+                            '-cq', '30',
+                            '-preset', 'p1'
+                        ]
+                ) as writer:
+                    for i in range(len(self.frames)-1):
+                        rgb_frame = cv2.cvtColor(self.frames[i], cv2.COLOR_BGR2RGB)
+                        writer.append_data(rgb_frame)
+            else:
                 with imageio.get_writer(
                         self.outPath,
                         fps=out_fps,
@@ -311,22 +378,6 @@ class SaveMixVideos():
                             '-movflags', '+faststart'  # Web优化：立即播放
                         ]
                 ) as writer:
-                    # print("outPath:",outPath)
-                    for i in range(len(self.frames)-1):
-                        rgb_frame = cv2.cvtColor(self.frames[i], cv2.COLOR_BGR2RGB)
-                        writer.append_data(rgb_frame)
-            else:
-                with imageio.get_writer(
-                        self.outPath,
-                        fps=out_fps,
-                        codec="h264_nvenc",
-                        pixelformat="yuv420p",
-                        output_params=[
-                            '-cq', '30',
-                            '-preset', 'p1'
-                        ]
-                ) as writer:
-                    # print("outPath:",outPath)
                     for i in range(len(self.frames)-1):
                         rgb_frame = cv2.cvtColor(self.frames[i], cv2.COLOR_BGR2RGB)
                         writer.append_data(rgb_frame)
@@ -570,62 +621,71 @@ class VideoProcessor:
         #     '-f', 'rtsp',
         #     self.rtspOutPut
         # ]
-        command = [
-            # 'ffmpeg',
-            # '-hwaccel', 'cuda',
-            # "-hwaccel_output_format", "cuda",  # 显存直接传递数据
-            # '-f', 'rawvideo',
-            # '-vcodec', 'rawvideo',
-            # '-pix_fmt', 'bgr24',
-            # '-s', f'{output_width}x{output_height}',
-            # '-r', str(out_fps),
-            # '-i', '-',
-            # # 视频编码参数
-            # '-vf', 'format=nv12',  # 或者使用 'format=yuv420p'，但nv12是硬件加速编码器更喜欢的
-            # "-c:v", "h264_nvenc",  # NVIDIA H.264编码
-            # "-preset", "p3",  # 平衡预设
-            # "-b:v", "2M",  # 目标码率
-            # "-g", "12",  # 关键帧间隔
-            # "-profile:v", "main",  # H.264配置
-            # '-rtsp_transport', 'tcp',
-            # '-f', 'rtsp',
-            # self.rtspOutPut
-            'ffmpeg',
-            # '-hwaccel', 'cuda',
-            '-y',
-            '-f', 'rawvideo',
-            '-vcodec', 'rawvideo',
-            '-pix_fmt', 'bgr24',
-            '-s', f'{output_width}x{output_height}',
-            '-r', str(out_fps),
-            '-i', '-',
-            '-c:v', 'libx264',
-            "-g", "12",  # 关键帧间隔
-            '-rtsp_transport', 'tcp',
-            '-preset', 'ultrafast',
-            '-tune', 'zerolatency',
-            '-f', 'rtsp',
-            self.rtspOutPut
-        ] if osName == "windows" else [
-            'ffmpeg',
-            '-hwaccel', 'cuda',
-            "-hwaccel_output_format", "cuda",  # 显存直接传递数据
-            '-f', 'rawvideo',
-            '-vcodec', 'rawvideo',
-            '-pix_fmt', 'bgr24',
-            '-s', f'{output_width}x{output_height}',
-            '-r', str(out_fps),
-            '-i', '-',
-            # 视频编码参数
-            "-c:v", "h264_nvenc",  # NVIDIA H.264编码
-            "-preset", "p3",  # 平衡预设
-            "-b:v", "2M",  # 目标码率
-            "-g", "12",  # 关键帧间隔
-            "-profile:v", "main",  # H.264配置
-            '-rtsp_transport', 'tcp',
-            '-f', 'rtsp',
-            self.rtspOutPut
+        # 有 CUDA 且允许时用 NVENC；否则全平台统一 CPU libx264（避免 Linux 无显卡时 ffmpeg 秒退导致 Broken pipe）。
+        cpu_rtsp_cmd = [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{output_width}x{output_height}",
+            "-r",
+            str(out_fps),
+            "-i",
+            "-",
+            "-c:v",
+            "libx264",
+            "-g",
+            "12",
+            "-rtsp_transport",
+            "tcp",
+            "-preset",
+            "ultrafast",
+            "-tune",
+            "zerolatency",
+            "-f",
+            "rtsp",
+            self.rtspOutPut,
         ]
+        nvenc_rtsp_cmd = [
+            "ffmpeg",
+            "-hwaccel",
+            "cuda",
+            "-hwaccel_output_format",
+            "cuda",
+            "-f",
+            "rawvideo",
+            "-vcodec",
+            "rawvideo",
+            "-pix_fmt",
+            "bgr24",
+            "-s",
+            f"{output_width}x{output_height}",
+            "-r",
+            str(out_fps),
+            "-i",
+            "-",
+            "-c:v",
+            "h264_nvenc",
+            "-preset",
+            "p3",
+            "-b:v",
+            "2M",
+            "-g",
+            "12",
+            "-profile:v",
+            "main",
+            "-rtsp_transport",
+            "tcp",
+            "-f",
+            "rtsp",
+            self.rtspOutPut,
+        ]
+        command = nvenc_rtsp_cmd if _ffmpeg_use_nvenc() else cpu_rtsp_cmd
         return subprocess.Popen(command, stdin=subprocess.PIPE)
 
     def write_frame(self, frame, id, redis):
