@@ -104,6 +104,13 @@ def _ffmpeg_use_nvenc() -> bool:
     return bool(torch.cuda.is_available())
 
 
+# h264_nvenc 的 -preset：FFmpeg 4.2（Rocky 等 rpm）只认 ll/fast/hq 等；p1~p7 为较新版本才有。
+# 需要可设置环境变量 MODEL_FORGE_FFMPEG_NVENC_PRESET=fast 等覆盖。
+FFMPEG_NVENC_PRESET = (
+    os.getenv("MODEL_FORGE_FFMPEG_NVENC_PRESET", "ll").strip() or "ll"
+)
+
+
 def _resolve_imageio_ffmpeg_exe() -> None:
     """按系统为 imageio 设置 ffmpeg 可执行文件路径。"""
     if IS_WINDOWS:
@@ -285,7 +292,7 @@ class FrameBuffer:
                             pixelformat="yuv420p",
                             output_params=[
                                 '-cq', '30',
-                                '-preset', 'p1'
+                                '-preset', FFMPEG_NVENC_PRESET,
                             ]
                     ) as writer:
                         for i in range(begin_frame_num, end_frame_num):
@@ -359,7 +366,7 @@ class SaveMixVideos():
                         pixelformat="yuv420p",
                         output_params=[
                             '-cq', '30',
-                            '-preset', 'p1'
+                            '-preset', FFMPEG_NVENC_PRESET,
                         ]
                 ) as writer:
                     for i in range(len(self.frames)-1):
@@ -420,7 +427,7 @@ def save_frames_as_video(frames, output_path):
                 pixelformat="yuv420p",
                 output_params=[
                     '-cq', '30',
-                    '-preset', 'p1'
+                    '-preset', FFMPEG_NVENC_PRESET,
                 ]
         ) as writer:
 
@@ -613,7 +620,7 @@ class VideoProcessor:
         #     # 视频编码参数
         #     '-vf', 'format=nv12',  # 或者使用 'format=yuv420p'，但nv12是硬件加速编码器更喜欢的
         #     "-c:v", "h264_nvenc",  # NVIDIA H.264编码
-        #     "-preset", "p3",  # 平衡预设
+        #     "-preset", "ll",  # FFmpeg 4.x 用 ll/fast；p3 仅新版 FFmpeg
         #     "-b:v", "2M",  # 目标码率
         #     "-g", "12",  # 关键帧间隔
         #     "-profile:v", "main",  # H.264配置
@@ -672,7 +679,7 @@ class VideoProcessor:
             "-c:v",
             "h264_nvenc",
             "-preset",
-            "p3",
+            FFMPEG_NVENC_PRESET,
             "-b:v",
             "2M",
             "-g",
