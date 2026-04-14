@@ -110,6 +110,19 @@ FFMPEG_NVENC_PRESET = (
     os.getenv("MODEL_FORGE_FFMPEG_NVENC_PRESET", "ll").strip() or "ll"
 )
 
+# 节拍诊断开关：设为 1/true/on 后打印节拍映射与关键状态迁移。
+_BEAT_TRACE_ON = os.getenv("MODEL_FORGE_BEAT_TRACE", "0").strip().lower() in (
+    "1",
+    "true",
+    "yes",
+    "on",
+)
+
+
+def _beat_trace(msg: str) -> None:
+    if _BEAT_TRACE_ON:
+        print(f"[BEAT_TRACE] {msg}")
+
 
 def _resolve_imageio_ffmpeg_exe() -> None:
     """按系统为 imageio 设置 ffmpeg 可执行文件路径。"""
@@ -864,6 +877,19 @@ def start_process_video_stream(config: ProcessorConfig, redis: RedisManager):
     begin_beat_name = beat_list[0].beatName
     # 结束节拍
     last_beat_name = beat_list[-1].beatName
+    beat_order = [getattr(beat, "beatName", None) for beat in beat_list]
+    beat_label_map = {}
+    for beat in beat_list:
+        labels = []
+        for label in (getattr(beat, "labelList", None) or []):
+            label_name = getattr(label, "labelName", None)
+            if label_name:
+                labels.append(label_name)
+        beat_label_map[getattr(beat, "beatName", None)] = labels
+    _beat_trace(
+        f"config.id={config.id} begin={begin_beat_name} last={last_beat_name} order={beat_order}"
+    )
+    _beat_trace(f"label_to_beat_map={beat_label_map}")
     # endregion
 
 # region 创建节拍时间限制映射
@@ -930,6 +956,7 @@ def start_process_video_stream(config: ProcessorConfig, redis: RedisManager):
     buffer = FrameBuffer(delay_frames=def_delay_frames_num, max_frame_num=def_max_frame_num)
     statusKey = REDIS_KEY_PROCESS_STATUS + str(config.id)
     i: int = 0
+    last_trace_beat_name = None
     # frame_count = 0
     # 动作判定结果  1：OK 2：NG，3：未开始（默认3）
     action_status = "1"
@@ -1273,6 +1300,14 @@ def start_process_video_stream(config: ProcessorConfig, redis: RedisManager):
                             beat_id = next(
                                 (beat.id for beat in beat_list if beat.beatName == list_beat_name), None
                             )
+                            if list_beat_name != last_trace_beat_name:
+                                _beat_trace(
+                                    "hit label="
+                                    f"{max_label_key} conf={max_label_value} -> beat={list_beat_name}; "
+                                    f"cached_beat={redis_beat_name}; begin={begin_beat_name}; "
+                                    f"last={last_beat_name}; redis_action_time={redis_action_time}"
+                                )
+                                last_trace_beat_name = list_beat_name
 
                             '''判断redis不是None得时候业务处理'''
                             if redis is not None:
@@ -1629,6 +1664,11 @@ def start_process_video_stream(config: ProcessorConfig, redis: RedisManager):
                             # 动作开始时间不为空 + 当前节拍为最后节拍 == == == >
                             # 计算动作时间 + 清空缓存动作开始时间 + 重置上面两个变量 == == == = > 最后统一调接口
                             if redis_action_time is not None and list_beat_name == last_beat_name:
+                                _beat_trace(
+                                    "trigger final logType=2 "
+                                    f"beat={list_beat_name} action_status={action_status} "
+                                    f"action_begin={redis_action_time} end={timestamp}"
+                                )
                                 print(f'{action_status}')
                                 # 字符串转datetime对象
                                 action_begin_time = redis_action_time
