@@ -562,8 +562,9 @@ def yolo_process_single_frame(single_frame, yolo_model, THRESH, begin_beat_name,
             print(x1)
             # 判断标签获取的节拍名不等于开始节拍或者获取的标签名不包含涂油
             # 并且x1的左边点大于屏幕宽度的一半的时候
-            if (beat_name != begin_beat_name or '涂油' not in label) and x1 > frame_width // 2:
-                is_result = False
+            # 临时关闭：右半屏会整框丢弃，导致 detection_list 无该目标、Java 不推送。
+            # if (beat_name != begin_beat_name or '涂油' not in label) and x1 > frame_width // 2:
+            #     is_result = False
             
             # if ("ANT插排线_WIFIA" == label and confidence<0.95):
             #     is_result = False
@@ -802,8 +803,9 @@ def cnn_process_single_frame(single_frame, model, device, category_index, THRESH
             beat_name = find_beat_name_by_label(beat_list, label)
             # 判断标签获取的节拍名不等于开始节拍或者获取的标签名不包含涂油
             # 并且x1的左边点大于屏幕宽度的一半的时候
-            if (beat_name != begin_beat_name or '涂油' not in label) and x1 > frame_width // 2:
-                is_result = False
+            # 临时关闭：与 YOLO 分支一致，避免右半屏检测不进 detection_list。
+            # if (beat_name != begin_beat_name or '涂油' not in label) and x1 > frame_width // 2:
+            #     is_result = False
             if is_result:
                 detections.append({
                     "labelName": label,
