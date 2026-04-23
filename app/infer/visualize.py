@@ -9,6 +9,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 _FONT_PATHS = [
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fonts", "simsunb.ttf")),
+    "/usr/share/fonts/myfonts/truetype/STSONG.TTF",
+    "/usr/share/fonts/myfonts/truetype/SIMYOU.TTF",
     "/usr/share/fonts/myfonts/truetype/msyh.ttc",
     "/usr/share/fonts/myfonts/truetype/ARIALUNI.TTF",
     "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Light.ttc",
@@ -19,9 +21,12 @@ _FONT_PATHS = [
     "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
 ]
 _FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+_FONT_SOURCE_BY_SIZE: dict[int, str] = {}
+_FONT_LOGGED = False
 
 
 def _get_font(size_px: int) -> ImageFont.FreeTypeFont:
+    global _FONT_LOGGED
     size_px = max(12, int(size_px))
     cached = _FONT_CACHE.get(size_px)
     if cached is not None:
@@ -30,10 +35,18 @@ def _get_font(size_px: int) -> ImageFont.FreeTypeFont:
         if os.path.exists(p):
             font = ImageFont.truetype(p, size_px)
             _FONT_CACHE[size_px] = font
+            _FONT_SOURCE_BY_SIZE[size_px] = p
+            if not _FONT_LOGGED:
+                print(f"[visualize] PIL font selected: {p}")
+                _FONT_LOGGED = True
             return font
     # 兜底，避免字体缺失时抛异常
     font = ImageFont.load_default()
     _FONT_CACHE[size_px] = font
+    _FONT_SOURCE_BY_SIZE[size_px] = "PIL_DEFAULT"
+    if not _FONT_LOGGED:
+        print("[visualize] PIL font fallback: PIL_DEFAULT")
+        _FONT_LOGGED = True
     return font
 
 
