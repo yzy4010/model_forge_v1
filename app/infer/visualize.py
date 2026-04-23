@@ -212,9 +212,13 @@ def draw_alias_detections(
 
             x1, y1, x2, y2 = coords
             conf = det.get("conf")
-
-            # 构造显示文本
-            text = f"{alias}: {conf:.2f}" if isinstance(conf, (int, float)) else f"{alias}"
+            # 优先使用模型输出 label（来自权重 names），避免 alias 链路编码异常导致方框。
+            label = det.get("label")
+            if not isinstance(label, str) or not label.strip():
+                label = alias
+            # 过滤不可见控制字符，避免渲染异常
+            safe_label = "".join(ch for ch in label if ch.isprintable()).strip() or "unknown"
+            text = f"{safe_label}: {conf:.2f}" if isinstance(conf, (int, float)) else safe_label
 
             # 2. 绘制检测框
             cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
