@@ -1,8 +1,74 @@
 from __future__ import annotations
 
+import os
 from typing import Any, Iterable, Mapping, Sequence
 
 import cv2
+import numpy as np
+from PIL import Image, ImageDraw, ImageFont
+
+_FONT_PATHS = [
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fonts", "simsunb.ttf")),
+    "/usr/share/fonts/myfonts/truetype/msyh.ttc",
+    "/usr/share/fonts/myfonts/truetype/ARIALUNI.TTF",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Light.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Medium.ttc",
+    "/usr/share/fonts/google-noto-cjk/NotoSansCJK-Black.ttc",
+    "/usr/share/fonts/google-noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/wqy-zenhei/wqy-zenhei.ttc",
+]
+_FONT_CACHE: dict[int, ImageFont.FreeTypeFont] = {}
+
+
+def _get_font(size_px: int) -> ImageFont.FreeTypeFont:
+    size_px = max(12, int(size_px))
+    cached = _FONT_CACHE.get(size_px)
+    if cached is not None:
+        return cached
+    for p in _FONT_PATHS:
+        if os.path.exists(p):
+            font = ImageFont.truetype(p, size_px)
+            _FONT_CACHE[size_px] = font
+            return font
+    # 兜底，避免字体缺失时抛异常
+    font = ImageFont.load_default()
+    _FONT_CACHE[size_px] = font
+    return font
+
+
+def _draw_text_with_bg(
+        frame: Any,
+        text: str,
+        left: int,
+        top: int,
+        bg_color_bgr: tuple[int, int, int],
+        text_color_bgr: tuple[int, int, int],
+        font_size_px: int,
+) -> Any:
+    """用 PIL 绘制中文文本，并保持 OpenCV 的 BGR 图像流。"""
+    pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+    draw = ImageDraw.Draw(pil_img)
+    font = _get_font(font_size_px)
+
+    # 使用 textbbox 获取真实文本尺寸，兼容中文。
+    l, t, r, b = draw.textbbox((0, 0), text, font=font)
+    text_w = max(1, r - l)
+    text_h = max(1, b - t)
+    pad = max(2, int(font_size_px * 0.22))
+
+    x1 = max(0, int(left))
+    y1 = max(0, int(top))
+    x2 = x1 + text_w + pad * 2
+    y2 = y1 + text_h + pad * 2
+
+    # 先画背景框，再画文字（颜色需从 BGR 转 RGB）。
+    bg_rgb = (bg_color_bgr[2], bg_color_bgr[1], bg_color_bgr[0])
+    text_rgb = (text_color_bgr[2], text_color_bgr[1], text_color_bgr[0])
+    draw.rectangle((x1, y1, x2, y2), fill=bg_rgb)
+    draw.text((x1 + pad, y1 + pad), text, font=font, fill=text_rgb)
+
+    return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 def draw_detections(
         frame: Any,
@@ -24,16 +90,15 @@ def draw_detections(
 
     # 2. 绘制标题 (左上角)
     if title:
-        title_thickness = max(2, int(3 * base_scale))
-        title_scale = max(0.8, 1.0 * base_scale)
-        # 绘制带阴影的标题以增强对比度
-        cv2.putText(
-            overlay, title, (12, 32), cv2.FONT_HERSHEY_SIMPLEX,
-            title_scale, (0, 0, 0), title_thickness + 1, cv2.LINE_AA
-        )
-        cv2.putText(
-            overlay, title, (10, 30), cv2.FONT_HERSHEY_SIMPLEX,
-            title_scale, (0, 255, 0), title_thickness, cv2.LINE_AA
+        title_font_px = max(16, int(26 * base_scale))
+        overlay = _draw_text_with_bg(
+            overlay,
+            title,
+            left=10,
+            top=8,
+            bg_color_bgr=(0, 80, 0),
+            text_color_bgr=(255, 255, 255),
+            font_size_px=title_font_px,
         )
 
     for det in detections:
@@ -56,33 +121,18 @@ def draw_detections(
 
         # 5. 绘制标签背景和文字
         if text:
-            # 计算文字大小
-            (text_w, text_h), baseline = cv2.getTextSize(
-                text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-            )
-
-            # 确保标签背景不超出边界 (如果框太靠顶，则向下移动背景)
-            padding = int(5 * base_scale)
-            bg_y1 = y1 - text_h - baseline - padding
-            if bg_y1 < 0:
-                bg_y1 = y1  # 如果上方没空间，就贴着框内顶部绘制
-
-            bg_y2 = bg_y1 + text_h + baseline + padding
-            bg_x2 = x1 + text_w + padding
-
-            # 绘制实心背景矩形，使文字更清晰
-            cv2.rectangle(overlay, (x1, bg_y1), (bg_x2, bg_y2), color, -1)
-
-            # 绘制文字 (黑色文字在绿色背景上最清晰)
-            cv2.putText(
+            font_px = max(14, int(22 * base_scale))
+            label_top = y1 - (font_px + 10)
+            if label_top < 0:
+                label_top = y1
+            overlay = _draw_text_with_bg(
                 overlay,
                 text,
-                (x1 + int(padding / 2), bg_y2 - baseline - int(padding / 2)),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                font_scale,
-                (0, 0, 0),  # 黑色文字
-                thickness,
-                cv2.LINE_AA,
+                left=x1,
+                top=label_top,
+                bg_color_bgr=color,
+                text_color_bgr=(0, 0, 0),
+                font_size_px=font_px,
             )
 
     return overlay
@@ -171,43 +221,24 @@ def draw_alias_detections(
 
             # 3. 绘制带背景的标签文字
             if text:
-                # 计算文字占据的尺寸
-                (text_w, text_h), baseline = cv2.getTextSize(
-                    text, cv2.FONT_HERSHEY_SIMPLEX, font_scale, thickness
-                )
-
-                # 确定背景框的位置（尽量放在框上方，如果太靠顶则放在框内）
-                padding = int(5 * base_scale)
-                bg_y1 = y1 - text_h - baseline - padding
-                if bg_y1 < 0:
-                    bg_y1 = y1
-
-                bg_y2 = bg_y1 + text_h + baseline + padding
-                bg_x2 = x1 + text_w + padding
-
-                # 绘制实心背景矩形
-                cv2.rectangle(overlay, (x1, bg_y1), (bg_x2, bg_y2), color, -1)
-
-                # 绘制文字
-                # 为了清晰，根据背景颜色亮度决定文字用黑色还是白色
-                # 简单处理：如果背景是绿色/浅色，用黑色；如果是深色，用白色
-                # 这里默认使用对比色或固定白色/黑色
                 text_color = (255, 255, 255)  # 默认白色
                 # 如果颜色亮度较高，则使用黑色文字
                 if isinstance(color, (list, tuple)) and len(color) >= 3:
                     brightness = (color[0] * 299 + color[1] * 587 + color[2] * 114) / 1000
                     if brightness > 128:
                         text_color = (0, 0, 0)
-
-                cv2.putText(
+                font_px = max(14, int(22 * base_scale))
+                label_top = y1 - (font_px + 10)
+                if label_top < 0:
+                    label_top = y1
+                overlay = _draw_text_with_bg(
                     overlay,
                     text,
-                    (x1 + int(padding / 2), bg_y2 - baseline - int(padding / 2)),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    font_scale,
-                    text_color,
-                    thickness,
-                    cv2.LINE_AA,
+                    left=x1,
+                    top=label_top,
+                    bg_color_bgr=color,
+                    text_color_bgr=text_color,
+                    font_size_px=font_px,
                 )
 
     return overlay
