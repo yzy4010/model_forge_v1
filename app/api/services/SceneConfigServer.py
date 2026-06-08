@@ -21,18 +21,18 @@ CREATE TABLE IF NOT EXISTS scene_configs (
 
 class SceneConfigDB:
 
-    _fileds = """ id, scene_id, rtsp_url, sample_fps, scenario_name, job_id, status,
+    _fileds = """ id, scene_id, rtsp_url, sample_fps, scenario_name, job_id, status, rtsp_output,
         DATE_FORMAT(created_at, '%%Y-%%m-%%d %%H:%%i:%%s') AS created_at """
 
     """
     推理场景主配置表(scene_configs)相关操作方法
     """
-    def create_scene_config(self, scene_id, rtsp_url, sample_fps=4, scenario_name=None):
+    def create_scene_config(self, scene_id, rtsp_url, sample_fps=4, scenario_name=None, rtsp_output=None):
         sql = """
-            INSERT INTO scene_configs (scene_id,rtsp_url, sample_fps, scenario_name)
-            VALUES (%s, %s, %s, %s)
+            INSERT INTO scene_configs (scene_id, rtsp_url, sample_fps, scenario_name, rtsp_output)
+            VALUES (%s, %s, %s, %s, %s)
         """
-        params = (scene_id, rtsp_url, sample_fps, scenario_name)
+        params = (scene_id, rtsp_url, sample_fps, scenario_name, rtsp_output)
         db.execute(sql, params)
         res = db.fetch_one("SELECT LAST_INSERT_ID()")
         return res[0] if res else None
@@ -41,7 +41,7 @@ class SceneConfigDB:
         sql = f"SELECT { self._fileds } FROM scene_configs WHERE scene_id=%s"
         return db.fetch_dict(sql, (scene_id,))
 
-    def update_scene_config(self, scene_id, rtsp_url=None, sample_fps=None, scenario_name=None):
+    def update_scene_config(self, scene_id, rtsp_url=None, sample_fps=None, scenario_name=None, rtsp_output=None):
         fields = []
         params = []
         if rtsp_url is not None:
@@ -53,6 +53,9 @@ class SceneConfigDB:
         if scenario_name is not None:
             fields.append('scenario_name=%s')
             params.append(scenario_name)
+        if rtsp_output is not None:
+            fields.append('rtsp_output=%s')
+            params.append(rtsp_output)
         if not fields:
             return 0
         sql = f"UPDATE scene_configs SET {', '.join(fields)} WHERE scene_id=%s"

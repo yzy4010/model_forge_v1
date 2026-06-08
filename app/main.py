@@ -34,19 +34,25 @@ from app.services.job_store import job_store
 from app.services.meta import utc_now_iso, write_meta
 from app.services.yolo_presets import resolve_augment_params, supports_freeze_param
 from app.trainers.yolo_ultralytics import run_yolo_train
+from app.config import PUBLIC_TYPE
+# import multiprocessing as mp  # 之前用于 extra_service 子进程，暂时不需要
 
 from fastapi.middleware.cors import CORSMiddleware
 
 import sys
 from pathlib import Path
 
-LEGACY_ROOT = Path(__file__).resolve().parent / "services" / "video_stream_legacy"
+LEGACY_ROOT = Path(__file__).resolve().parent / "legacy"
 if str(LEGACY_ROOT) not in sys.path:
     sys.path.insert(0, str(LEGACY_ROOT))
 
 origins = [
-"http://localhost",
-"http://localhost:8082"
+    "http://localhost",
+    "http://localhost:8082",      # [本地开发] 前端开发服务器
+    "http://localhost:8081",      # [本地开发] Java RuoYi 后端（前端可能通过Java转发调用Python）
+    "http://127.0.0.1",
+    "http://127.0.0.1:8082",
+    "http://127.0.0.1:8081",
 ]
 
 # 配置日志
@@ -65,9 +71,40 @@ async def startup_event():
     socket_manager.loop = asyncio.get_running_loop()
     # print("✅ FastAPI 主事件循环已捕获，SocketIO 跨线程准备就绪")
 
+@app.on_event("shutdown")
+async def shutdown_event():
+    # 清理 extra_service 子进程（如果存在）—— 已注释 extra_service，保留备查
+    # if hasattr(app.state, "extra_process"):
+    #     proc = app.state.extra_process
+    #     if proc.is_alive():
+    #         proc.terminate()
+    #         proc.join()
+    #         print("Extra service process terminated")
+    pass
+
 socket_manager.mount_to_fastapi(app)
 app.include_router(infer_router)
 app.include_router(preview_router)
+
+# ===== 旧版子系统（根据 PUBLIC_TYPE 条件注册） =====
+if PUBLIC_TYPE == "1":
+    # 推理模式：注册旧版推理 API
+    from app.legacy.api import legacy_router
+    app.include_router(legacy_router)
+
+    # 启动 Java 轮询子进程（extra_service）—— 暂时注释，和 python/ 项目保持一致
+    # from app.legacy.extra_service import process_service
+    # _extra_proc = mp.Process(target=process_service, daemon=True)
+    # _extra_proc.start()
+    # app.state.extra_process = _extra_proc
+    # 工序推理桥接 API（仅推理服务器注册）
+    from app.api.fjy_infer.infer_runner_api import router as fjy_infer_router
+    app.include_router(fjy_infer_router)
+
+elif PUBLIC_TYPE == "2":
+    # 训练模式：注册旧版训练 API
+    from app.legacy.api import legacy_router
+    app.include_router(legacy_router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -1014,9 +1051,4 @@ app.include_router(SceneConfigRoute.SceneConfig_Router)
 app.include_router(SceneModelConfigRoute.SceneModelConfig_Router)
 app.include_router(SceneRoiConfigRoute.SceneRoiConfig_Router)
 app.include_router(SceneRuleConfigRoute.SceneRuleConfig_Route)
-
-
-from app.api.fjy_infer.infer_runner_api import router as infer_runner_router
-
-app.include_router(infer_runner_router)
 

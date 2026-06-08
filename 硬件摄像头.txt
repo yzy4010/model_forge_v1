@@ -1,0 +1,129 @@
+192.168.198.200        推理服务器   	lenovo/123456
+mysql    root   MySql8123!@#
+redis   redis
+现场交换机11口
+
+192.168.198.201        训练服务器   	lenovo/123456
+现场交换机12口
+
+192.168.1.190      摄像头  admin/Glory2025
+
+rtsp://admin:Glory2025@192.168.1.190:554/streaming/channels/1
+
+rtsp://admin:Glory2025@172.20.8.32:554/streaming/channels/1
+
+nohup ffmpeg -re -stream_loop -1 -i "/data/deduction/data/videos/3_output_35.mp4" -c copy -f rtsp rtsp://localhost:8554/craft3 > /data/log/craft3.log &
+
+nohup ffmpeg -re -stream_loop -1 -hwaccel cuda -i "/data/deduction/data/videos/device_1748309540692.mp4" -c copy -f rtsp rtsp://localhost:8554/craft3 > /data/log/craft3.log &
+
+nohup ffmpeg -re -stream_loop -1 -hwaccel cuda -i "/data/deduction/data/videos/device_1748251281910.mp4" -c copy -f rtsp rtsp://localhost:8554/craft2 > /data/log/craft2.log &
+
+
+nohup ffmpeg -re -stream_loop -1 -hwaccel cuda -i "/data/deduction/data/videos/WeChat_20250703092815.mp4" -c copy -f rtsp rtsp://localhost:8554/craft4 > /data/log/craft4.log &
+
+ffmpeg -re -stream_loop -1 -i "/data/deduction/data/videos/device_1748309540692.mp4" -c copy -f rtsp rtsp://localhost:8554/craft3
+
+ffmpeg -re -stream_loop -1 -i "/data/deduction/data/videos/05955aea306d673ad25b07b95fa316dc_raw.mp4" -c copy -f rtsp rtsp://localhost:8554/craft1
+ffmpeg -re -stream_loop -1 -i "D:/data/videos/1337918883.mp4" -c copy -f rtsp rtsp://localhost:8554/craft1
+ffmpeg -re -stream_loop -1 -i "D:/data/videos/1337918883.mp4" -c copy -f rtsp rtsp://127.0.0.1:8554/mystream
+ffmpeg -re -stream_loop -1 -i "D:/data/videos/fbaac4c3-170e-4a1c-8033-c902cfd441de.mp4" -c copy -f rtsp rtsp://127.0.0.1:8554/mystream
+ffmpeg -re -stream_loop -1 -i "D:/data/videos/fbaac4c3-170e-4a1c-8033-c902cfd441de.mp4" -c copy -f rtsp rtsp://localhost:8554/craft1
+
+
+
+ffmpeg -re -stream_loop -1 -i "/data/deduction/data/videos/VID_20250702_185712.mp4" -c copy -f rtsp rtsp://localhost:8554/phone
+
+ffmpeg -i input.mp4 -ss [开始时间] -to [结束时间] -vf "scale=[宽度]:[高度]" output.mp4
+
+截断视频
+ffmpeg -i 0fe0b46634aedc117e483783a0924a55_raw.mp4 -ss 00:00:30 -to 00:00:35 -vf "scale=1920:1080" bluea.mp4
+
+将视频每6帧截一张图片
+ffmpeg -i input.mp4 -vf "select=not(mod(n\,6))" -vsync vfr -qscale:v 2 output_%04d.jpg
+    -qscale:v 2：JPEG 质量（1-31，值越小质量越高，推荐 2-5）。
+多折线图
+    https://echarts.apache.org/examples/zh/editor.html?c=line-stack
+多柱状图
+    https://echarts.apache.org/examples/zh/editor.html?c=bar-y-category-stack
+多散点图
+    https://echarts.apache.org/examples/zh/editor.html?c=scatter-weight
+
+
+合并视频
+ffmpeg -i "concat:input1.mp4|input2.mp4" -c copy output.mp4
+
+
+cd /data/mediamtx
+nohup ./mediamtx > /data/log/mediamtx.log &
+
+cd /projects/fjy/python
+nohup python main.py > /data/log/python.log &
+
+tail -f /data/log/python.log
+
+cd /projects/fjy/java
+nohup java -jar fjy.jar > /data/log/java_fjy.log & 
+
+tail -f /data/log/java_fjy.log
+
+192.168.198.202
+子网192.168.198.0/24
+网关192.168.198.2
+现场交换机13/14口
+
+
+
+
+[Unit]
+Description=MediaMTX (RTSP/WebRTC/RTMP/SRT/HLS server)
+After=network.target
+
+[Service]
+Type=simple
+User=lenovo
+ExecStart=/data/mediamtx/mediamtx /data/mediamtx/mediamtx.yml
+Restart=on-failure
+RestartSec=5
+StandardOutput=syslog
+StandardError=syslog
+SyslogIdentifier=mediamtx
+
+# 安全加固
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=read-only
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target
+
+
+# 重载 systemd 配置
+sudo systemctl daemon-reload
+
+# 启动服务
+sudo systemctl start mediamtx
+
+# 设置开机自启
+sudo systemctl enable mediamtx
+
+# 检查状态
+systemctl status mediamtx
+
+
+
+0813更新SQL
+ALTER TABLE beat_logs ADD COLUMN error_type char(1) NULL DEFAULT '0' COMMENT '日志级别1 INFO 2 WARN 3 ERROR' AFTER ai_result;
+ALTER TABLE process_logs ADD COLUMN error_type char(1) NULL DEFAULT '0' COMMENT '0:OK,1:严重超时,2:无开始节拍,3:多个节拍,4:节拍混乱';
+update beat_logs set error_type='0';
+update beat_logs set error_type='3' where logs_content like '%多个节拍%';
+update beat_logs set error_type='2' where logs_content like '%起始动作%';
+update beat_logs set error_type='1' where logs_content like '%工序混乱%';
+update process_logs set error_type='0';
+update process_logs set error_type='4' where logs_content like '%工序混乱%';
+update process_logs set error_type='3' where logs_content like '%多个节拍%';
+update process_logs set error_type='2' where logs_content like '%起始动作%';
+update process_logs set error_type='1' where logs_content like '%严重超时%';
+
+ALTER TABLE action_list ADD COLUMN action_long int not NULL DEFAULT '30' COMMENT '标准时长(秒)' AFTER action_name;
+ALTER TABLE action_beat_list ADD COLUMN beat_long int not NULL DEFAULT '10' COMMENT '标准时长(秒)' AFTER beat_name;

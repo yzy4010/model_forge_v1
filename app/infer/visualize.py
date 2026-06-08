@@ -7,8 +7,18 @@ import cv2
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+import platform as _platform
+
 _FONT_PATHS = [
+    # ========== Windows 系统字体（优先，完整 CJK 覆盖） ==========
+    "C:/Windows/Fonts/msyh.ttc",          # 微软雅黑
+    "C:/Windows/Fonts/simhei.ttf",        # 黑体
+    "C:/Windows/Fonts/simsun.ttc",        # 宋体
+    "C:/Windows/Fonts/STSONG.TTF",        # 华文宋体
+    # ========== 项目内置字体 ==========
     os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fonts", "simsunb.ttf")),
+    os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "fonts", "simhei.ttf")),
+    # ========== Linux 字体路径（原配置） ==========
     "/usr/share/fonts/myfonts/truetype/STSONG.TTF",
     "/usr/share/fonts/myfonts/truetype/SIMYOU.TTF",
     "/usr/share/fonts/myfonts/truetype/msyh.ttc",
@@ -33,7 +43,16 @@ def _get_font(size_px: int) -> ImageFont.FreeTypeFont:
         return cached
     for p in _FONT_PATHS:
         if os.path.exists(p):
-            font = ImageFont.truetype(p, size_px)
+            try:
+                font = ImageFont.truetype(p, size_px)
+                # 验证字体确实包含中文字形（拒绝 tofu 字体）
+                cjk_test = "中"
+                cjk_bbox = font.getbbox(cjk_test)
+                cjk_w = cjk_bbox[2] - cjk_bbox[0]
+                if cjk_w <= 3:
+                    continue
+            except Exception:
+                continue
             _FONT_CACHE[size_px] = font
             _FONT_SOURCE_BY_SIZE[size_px] = p
             if not _FONT_LOGGED:
@@ -198,64 +217,52 @@ def draw_alias_detections(
         results: Mapping[str, Mapping[str, Any]],
 ) -> Any:
     """
-    优化后的 draw_alias_detections 函数。
-    通过动态计算线宽、字体缩放，并为文字添加背景色块，确保在不同分辨率下都清晰可见。
+    与工序推理一致的标签样式：文字用边框颜色，无背景色块，空格分隔。
     """
     overlay = frame.copy()
     h, w = overlay.shape[:2]
 
     # 1. 动态计算基础参数 (以 1000px 为基准缩放)
     base_scale = min(w, h) / 1000.0
-    thickness = max(1, int(2 * base_scale))
-    font_scale = max(0.5, 0.6 * base_scale)
+    thickness = max(2, int(3 * base_scale))
 
     for alias, result in results.items():
         detections = result.get("detections", []) if isinstance(result, Mapping) else []
-        # 假设 _alias_color 是外部定义的函数
         color = _alias_color(alias)
 
         for det in detections:
             if not isinstance(det, Mapping):
                 continue
 
-            # 假设 _parse_bbox 是外部定义的函数
             coords = _parse_bbox(det)
             if coords is None:
                 continue
 
             x1, y1, x2, y2 = coords
             conf = det.get("conf")
-            # 优先使用模型输出 label（来自权重 names），避免 alias 链路编码异常导致方框。
+            # 优先使用模型输出 label
             label = det.get("label")
             if not isinstance(label, str) or not label.strip():
                 label = alias
-            # 过滤不可见控制字符，避免渲染异常
             safe_label = "".join(ch for ch in label if ch.isprintable()).strip() or "unknown"
-            text = f"{safe_label}: {conf:.2f}" if isinstance(conf, (int, float)) else safe_label
+            # 与工序推理一致的格式：空格分隔
+            text = f"{safe_label} {conf:.2f}" if isinstance(conf, (int, float)) else safe_label
 
-            # 2. 绘制检测框
+            # 2. 绘制检测框（加粗）
             cv2.rectangle(overlay, (x1, y1), (x2, y2), color, thickness)
 
-            # 3. 绘制带背景的标签文字
+            # 3. 与工序推理一致：无背景色块，文字直接画在画面（加大字号）
             if text:
-                text_color = (255, 255, 255)  # 默认白色
-                # 如果颜色亮度较高，则使用黑色文字
-                if isinstance(color, (list, tuple)) and len(color) >= 3:
-                    brightness = (color[0] * 299 + color[1] * 587 + color[2] * 114) / 1000
-                    if brightness > 128:
-                        text_color = (0, 0, 0)
-                font_px = max(14, int(22 * base_scale))
-                label_top = y1 - (font_px + 10)
+                font_px = max(18, int(30 * base_scale))
+                font = _get_font(font_px)
+                label_top = y1 - font_px - 6
                 if label_top < 0:
                     label_top = y1
-                overlay = _draw_text_with_bg(
-                    overlay,
-                    text,
-                    left=x1,
-                    top=label_top,
-                    bg_color_bgr=color,
-                    text_color_bgr=text_color,
-                    font_size_px=font_px,
-                )
+                pil_img = Image.fromarray(cv2.cvtColor(overlay, cv2.COLOR_BGR2RGB))
+                draw = ImageDraw.Draw(pil_img)
+                # 文字颜色直接用边框颜色（同工序推理）
+                text_rgb = (int(color[2]), int(color[1]), int(color[0]))
+                draw.text((x1, label_top), text, font=font, fill=text_rgb)
+                overlay = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
     return overlay

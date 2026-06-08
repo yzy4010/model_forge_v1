@@ -2,10 +2,10 @@ import time
 from threading import Lock
 from typing import Any, Dict, Optional
 
-from app.services.video_stream_legacy.common.redisManager import RedisManager
-from app.services.video_stream_legacy.common.threadTaskManager import ThreadTaskManager
-from app.services.video_stream_legacy.common.config import REDIS_KEY_PROCESS_STATUS
-from app.services.video_stream_legacy.java_config_client import (
+from app.legacy.common.redisManager import RedisManager
+from app.legacy.common.threadTaskManager import ThreadTaskManager
+from app.legacy.common.config import REDIS_KEY_PROCESS_STATUS
+from app.legacy.java_config_client import (
     fetch_all_processor_configs_from_java,
     fetch_processor_config_from_java,
 )

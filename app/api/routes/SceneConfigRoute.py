@@ -81,7 +81,7 @@ def _build_infer_stream_request_from_full_config(data: dict) -> InferStreamReque
 
     payload = {
         "rtsp_url": data["rtsp_url"],
-        "sample_fps": float(data.get("sample_fps") or 2.0),
+        "rtsp_output": data.get("rtsp_output"),
         "scenario": {
             "scenario_id": scenario["scenario_id"],
             "models": models_payload,
@@ -136,6 +136,7 @@ def _build_scene_full_config_data(scene_id: str) -> dict:
     main = scene_config_db.get_scene_config(scene_id)
     rtsp_url = main[0].get("rtsp_url") if main and isinstance(main, list) else None
     sample_fps = main[0].get("sample_fps") if main and isinstance(main, list) else 4
+    rtsp_output = main[0].get("rtsp_output") if main and isinstance(main, list) else None
 
     # 2. 模型配置
     models_raw = scene_model_config_db.list_models(scene_id) or []
@@ -231,6 +232,7 @@ def _build_scene_full_config_data(scene_id: str) -> dict:
 
     return {
         "rtsp_url": rtsp_url,
+        "rtsp_output": rtsp_output,
         "sample_fps": sample_fps,
         "scenario": {
             "scenario_id": scenario_id,
@@ -317,7 +319,8 @@ def update_scene_config(scene_id: str, cfg: dict = Body(...)):
         rtsp_url = cfg.get("rtsp_url")
         sample_fps = cfg.get("sample_fps")
         scenario_name = cfg.get("scenario_name")
-        updated = scene_config_db.update_scene_config(scene_id, rtsp_url, sample_fps, scenario_name)
+        rtsp_output = cfg.get("rtsp_output")
+        updated = scene_config_db.update_scene_config(scene_id, rtsp_url, sample_fps, scenario_name, rtsp_output)
         if updated == 0:
             raise HTTPException(status_code=404, detail="场景未找到或无参数更新")
         return JSONResponse(content={"code": 200, "msg": "场景配置更新成功"})
@@ -405,13 +408,15 @@ def save_scene_config(scene_data: dict = Body(...)):
         rtsp_url = scene_data.get("rtsp_url")
         sample_fps = scene_data.get("sample_fps", 4)
         scenario_name = scenario.get("scenario_name")
+        rtsp_output = scene_data.get("rtsp_output")
 
         # 2. 保存主配置（id为数据库自增，无需传递，自动生成）
         _id = scene_config_db.create_scene_config(
             scene_id=scene_id,
             rtsp_url=rtsp_url,
             sample_fps=sample_fps,
-            scenario_name=scenario_name
+            scenario_name=scenario_name,
+            rtsp_output=rtsp_output
         )
 
         print("保存主配置")

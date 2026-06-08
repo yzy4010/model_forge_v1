@@ -1,8 +1,8 @@
 from typing import Optional
 
-from app.services.video_stream_legacy.common.ajaxResult import getJsonWithOutJwt
-from app.services.video_stream_legacy.common.config import JAVA_API_PATH, GET_CAMERA_RETRIEVAL_VO
-from app.services.video_stream_legacy.model import JavaProcessorConfigResult, ProcessorConfig
+from app.legacy.common.ajaxResult import getJsonWithOutJwt
+from app.legacy.common.config import JAVA_API_PATH, GET_CAMERA_RETRIEVAL_VO
+from app.legacy.model import JavaProcessorConfigResult, ProcessorConfig
 
 
 def fetch_all_processor_configs_from_java() -> Optional[list[ProcessorConfig]]:

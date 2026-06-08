@@ -7,6 +7,7 @@ from typing import Optional, TYPE_CHECKING, Any, Dict
 
 if TYPE_CHECKING:
     from app.infer.push import WebhookSender
+    from app.infer.push.rtsp_publisher import StreamPublisher
 
 
 @dataclass
@@ -36,6 +37,7 @@ class InferenceJob:
     latest_encoded_ts_ms: int = 0
     preview_lock: Lock = field(default_factory=Lock)
     preview_thread: Optional[Thread] = None
+    rtsp_publisher: Optional["StreamPublisher"] = None
 
     def stop(self) -> None:
         self.stop_event.set()

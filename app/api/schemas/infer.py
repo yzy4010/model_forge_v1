@@ -72,9 +72,12 @@ class ScenarioSnapshot(BaseModel):
 class InferStreamRequest(BaseModel):
     rtsp_url: str = Field(..., description="RTSP stream URL")
     sample_fps: Optional[float] = Field(
-        2.0, description="Sampling FPS for RTSP reader"
+        default=None, description="(已弃用) 不再使用，保留兼容"
     )
     scenario: ScenarioSnapshot = Field(..., description="Scenario snapshot")
+    rtsp_output: Optional[str] = Field(
+        default=None, description="开启 HLS 推流（填任意非空值即可启用）"
+    )
 
 
 class InferStartResponse(BaseModel):

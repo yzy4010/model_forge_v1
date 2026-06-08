@@ -6,7 +6,7 @@ from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.api.services.dbHelp import db
-from app.services.video_stream_legacy.common.redisManager import RedisManager
+from app.legacy.common.redisManager import RedisManager
 from app.services.infer_runner import InferRunner
 
 router = APIRouter(prefix="/infer", tags=["infer"])

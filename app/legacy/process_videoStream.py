@@ -12,13 +12,13 @@ import numpy as np
 from ultralytics import YOLO
 from PIL import Image, ImageDraw, ImageFont
 
-from app.services.video_stream_legacy.common.ajaxResult import postJsonWithOutJwt
-from app.services.video_stream_legacy.common.config import *
-from app.services.video_stream_legacy.common.redisManager import RedisManager
+from app.legacy.common.ajaxResult import postJsonWithOutJwt
+from app.legacy.common.config import *
+from app.legacy.common.redisManager import RedisManager
 from datetime import datetime, timedelta
 
-from app.services.video_stream_legacy.common.threadTaskManager import ThreadTaskManager
-from app.services.video_stream_legacy.model import *
+from app.legacy.common.threadTaskManager import ThreadTaskManager
+from app.legacy.model import *
 
 try:
     from rcn.backbone.resnet50_fpn_model import resnet50_fpn_backbone  # type: ignore[import]

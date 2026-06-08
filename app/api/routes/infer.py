@@ -9,8 +9,12 @@ from threading import Thread
 from typing import Dict
 from urllib.parse import urlparse
 
+from pathlib import Path as FsPath
+
 import cv2
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse, StreamingResponse
+import requests as http_req
 
 from app.api.schemas.infer import InferStartResponse, InferStreamRequest
 from app.infer.inferencer import AliasModel, run_frame, validate_event
@@ -32,8 +36,8 @@ logger = logging.getLogger("model_forge.infer.routes")
 
 router = APIRouter(prefix="/infer", tags=["infer"])
 
-DEFAULT_SAMPLE_FPS = 2.0
-DEFAULT_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"
+DEFAULT_SAMPLE_FPS = 5.0  # 从 2.0 提高到 5.0，提高跟踪平滑度
+DEFAULT_WEBHOOK_URL = "http://127.0.0.1:18080/api/infer/events"  # 可通过环境变量 MODEL_FORGE_WEBHOOK_URL 覆盖
 
 
 def _resolve_webhook_url() -> str:
@@ -141,7 +145,6 @@ def _fmt_alias_summary(results: dict, aliases: list) -> str:
 def _run_job(
         job_id: str,
         rtsp_url: str,
-        sample_fps: float,
         models_by_alias: Dict[str, AliasModel],
         aliases: list[str],
         sender: WebhookSender,
@@ -158,11 +161,9 @@ def _run_job(
     frames_done = 0
     failed = False
 
-    if sample_fps <= 0:
-        raise ValueError("sample_fps must be positive")
-
-    interval_s = 1.0 / sample_fps
-    next_emit_time = time.monotonic()
+    # 与工序推理一致：每 5 帧取一帧做推理（源帧率 25-30 FPS → 推理 ~5-6 FPS）
+    FRAME_SAMPLE_INTERVAL = 5
+    _grab_frame_count = 0
     frame_idx = 0
 
     # ================= ROI 初始化 =================
@@ -192,22 +193,28 @@ def _run_job(
             if job.status != "running":
                 break
 
-            now = time.monotonic()
-            if now < next_emit_time:
-                time.sleep(min(0.01, next_emit_time - now))
-                continue
-
+            # 用帧计数代替时间采样：每次循环只从 latest_raw_frame_bgr 取最新帧
             with job.raw_lock:
                 frame = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
 
             if frame is None:
-                time.sleep(0.05)
+                time.sleep(0.01)
+                continue
+
+            _grab_frame_count += 1
+            # 只处理每第 FRAME_SAMPLE_INTERVAL 帧
+            if _grab_frame_count % FRAME_SAMPLE_INTERVAL != 0:
+                time.sleep(0.001)  # 稍让 CPU
                 continue
 
             ts_ms = int(time.time() * 1000)
 
             # ================= 模型推理 =================
+            _t0 = time.perf_counter()
             event = run_frame(models_by_alias, aliases, frame, ts_ms, frame_idx)
+            _infer_ms = (time.perf_counter() - _t0) * 1000
+            if _infer_ms > 300:  # 推理超过300ms打印警告
+                logger.warning("SLOW_INFER job=%s frame=%d infer_ms=%.0f", job_id, frame_idx, _infer_ms)
             event_results = event.get("results", {}) or {}
             # ===========================================
 
@@ -337,6 +344,14 @@ def _run_job(
                 # 可选：如果没触发，可以考虑是否删除旧的本地图片，或者直接跳过（推荐直接跳过）
                 # 无规则，或者保存所以模型推理图片
                 pass
+            # 4. RTSP 推流（如果配置了 rtsp_output）
+            rtsp_pub = getattr(job, "rtsp_publisher", None)
+            if rtsp_pub is not None:
+                try:
+                    rtsp_pub.write_frame(overlay)
+                except Exception:
+                    logger.exception("RTSP push failed job_id=%s", job_id)
+
             try:
                 validate_event(event)
             except AssertionError as exc:
@@ -373,12 +388,14 @@ def _run_job(
                 }
 
             logger.warning(
-                "MF_FRAME_SUMMARY job=%s scenario_id=%s frame=%s qps=%.2f elapsed=%.3fs ts_ms=%d results={%s}",
+                "MF_FRAME_SUMMARY job=%s scenario_id=%s frame=%s qps=%.2f elapsed=%.3fs "
+                "infer_ms=%.0f ts_ms=%d results={%s}",
                 job_id,
                 job.scenario_id,
                 frame_idx,
                 qps,
                 elapsed,
+                _infer_ms,
                 ts_ms,
                 alias_summary
             )
@@ -427,7 +444,6 @@ def _run_job(
             job.frame_idx = frame_idx
             frames_done = frame_idx
             frame_idx += 1
-            next_emit_time = max(next_emit_time + interval_s, time.monotonic())
 
     except Exception:
         failed = True
@@ -437,6 +453,14 @@ def _run_job(
 
     finally:
         sender.stop(timeout_s=1.0)
+
+        # 关闭 RTSP 推流
+        rtsp_pub = getattr(job, "rtsp_publisher", None)
+        if rtsp_pub is not None:
+            try:
+                rtsp_pub.close()
+            except Exception:
+                logger.exception("RTSP publisher close failed job_id=%s", job_id)
 
         if job.stop_event.is_set() or job.status == "stopping":
             _mark_job_stopped(job)
@@ -466,6 +490,8 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
         return
     target_interval = 1.0 / 15.0
     next_tick = time.monotonic()
+    _grab_count = 0
+    _bad_frame_count = 0
     try:
         while True:
             if job.stop_event.is_set():
@@ -473,6 +499,13 @@ def _frame_grabber_loop(job_id: str, rtsp_url: str) -> None:
             ok, frame = cap.read()
             if not ok:
                 time.sleep(0.05)
+                continue
+            # 帧完整性检查：跳过全黑或全零的损坏帧
+            _grab_count += 1
+            if frame is None or frame.size == 0 or frame.mean() < 1.0:
+                _bad_frame_count += 1
+                if _bad_frame_count % 10 == 1:
+                    logger.warning("Grabber bad frame job=%s bad=%d/%d", job_id, _bad_frame_count, _grab_count)
                 continue
             ts_ms = int(time.time() * 1000)
             with job.raw_lock:
@@ -495,12 +528,12 @@ def _preview_encoder_loop(job_id: str) -> None:
 
     preview_width = int(os.getenv("MODEL_FORGE_PREVIEW_WIDTH", "640") or "640")
     preview_width = max(160, preview_width)
-    preview_fps = float(os.getenv("MODEL_FORGE_PREVIEW_FPS", "8") or "8")
+    preview_fps = float(os.getenv("MODEL_FORGE_PREVIEW_FPS", "15") or "15")
     if preview_fps <= 0:
-        preview_fps = 8.0
+        preview_fps = 15.0
     min_interval_s = 1.0 / preview_fps
     next_at = time.monotonic()
-    quality = int(os.getenv("MODEL_FORGE_PREVIEW_JPEG_QUALITY", "55") or "55")
+    quality = int(os.getenv("MODEL_FORGE_PREVIEW_JPEG_QUALITY", "80") or "80")
     quality = max(30, min(95, quality))
 
     last_raw_ts_ms = -1
@@ -512,17 +545,20 @@ def _preview_encoder_loop(job_id: str) -> None:
             continue
         next_at = max(next_at + min_interval_s, time.monotonic())
 
+        # 读取最新原始帧（15 FPS，保证流畅度）
         with job.raw_lock:
             raw_ts_ms = int(getattr(job, "latest_raw_frame_ts_ms", 0) or 0)
             raw = None if job.latest_raw_frame_bgr is None else job.latest_raw_frame_bgr.copy()
 
         if raw is None:
+            time.sleep(0.05)
             continue
         if raw_ts_ms and raw_ts_ms == last_raw_ts_ms:
+            time.sleep(0.01)
             continue
         last_raw_ts_ms = raw_ts_ms
 
-        # snapshot inference overlays (cheap locks, avoid deep copy here)
+        # 读取最新推理结果（6 FPS 更新框，延迟仅 ~167ms）
         with job.res_lock:
             results = None if job.latest_results is None else dict(job.latest_results)
             triggered_rois = set(getattr(job, "latest_triggered_rois", set()))
@@ -538,6 +574,7 @@ def _preview_encoder_loop(job_id: str) -> None:
         except Exception:
             logger.exception("Preview overlay draw failed job_id=%s", job_id)
 
+        _enc_t0 = time.perf_counter()
         try:
             h, w = frame.shape[:2]
             if w > preview_width:
@@ -558,6 +595,9 @@ def _preview_encoder_loop(job_id: str) -> None:
                     job.latest_encoded_ts_ms = raw_ts_ms
         except Exception:
             logger.exception("Preview encode failed job_id=%s", job_id)
+        _enc_ms = (time.perf_counter() - _enc_t0) * 1000
+        if _enc_ms > 50:  # 编码超过50ms打印警告
+            logger.warning("SLOW_ENCODE job=%s encode_ms=%.0f", job_id, _enc_ms)
 
 
 @router.post("/stream", response_model=InferStartResponse)
@@ -615,12 +655,10 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         roi_config = roi_config.model_dump()
         # logger.info("ROI 配置转换: ROI config after model_dump: %s", roi_config)
 
-    sample_fps = req.sample_fps if req.sample_fps else DEFAULT_SAMPLE_FPS
-
     # 将 rule_engine 传入 _run_job
     thread = Thread(
         target=_run_job,
-        args=(job_id, req.rtsp_url, sample_fps, models_by_alias, aliases, sender, roi_config, rule_engine),
+        args=(job_id, req.rtsp_url, models_by_alias, aliases, sender, roi_config, rule_engine),
         daemon=True,
     )
 
@@ -642,9 +680,54 @@ def start_infer_stream(req: InferStreamRequest) -> InferStartResponse:
         )
         job.preview_thread = preview_thread
         preview_thread.start()
+
+        # RTSP 推流 → MediaMTX → 自动生成 HLS（与工序推理完全一致）
+        if req.rtsp_output:
+            from app.infer.push.rtsp_publisher import StreamPublisher
+            pub_dir = f"outputs/stream/{job_id}"
+            job.rtsp_publisher = StreamPublisher(pub_dir, fps=6)
+            logger.info("RTSP push enabled -> rtsp://127.0.0.1:8554/%s hls=http://127.0.0.1:8888/%s/", job_id, job_id)
     thread.start()
 
     return InferStartResponse(job_id=job_id, status="running")
+
+
+# === HLS 代理：转发到 MediaMTX（8888 端口），与工序推理共用同一套基础设施 ===
+MTX_HLS_BASE = "http://127.0.0.1:8888"
+
+
+def _proxy_media(hls_path: str) -> StreamingResponse:
+    """通用 HLS 代理函数。"""
+    url = f"{MTX_HLS_BASE}/{hls_path}"
+    try:
+        resp = http_req.get(url, timeout=5, stream=True)
+        resp.raise_for_status()
+        ct = resp.headers.get("content-type", "application/octet-stream")
+        return StreamingResponse(resp.iter_content(chunk_size=65536),
+                                 media_type=ct, status_code=resp.status_code,
+                                 headers={"Access-Control-Allow-Origin": "*"})
+    except Exception:
+        raise HTTPException(status_code=404, detail="HLS stream not available")
+
+
+@router.get("/{job_id}/index.m3u8")
+@router.get("/{job_id}/video/index.m3u8")
+@router.get("/{job_id}/hls/index.m3u8")
+@router.get("/{job_id}/stream/index.m3u8")
+def get_hls_manifest(job_id: str):
+    """代理 MediaMTX HLS 播放列表。"""
+    return _proxy_media(f"{job_id}/index.m3u8")
+
+
+@router.get("/{job_id}/{hls_file:path}")
+def get_hls_file(job_id: str, hls_file: str, request: Request):
+    """代理 MediaMTX HLS 片段（.ts .m4s .mp4 等）。"""
+    if ".." in hls_file or hls_file.startswith("/"):
+        raise HTTPException(status_code=400)
+    # 忽略非 HLS 资源的请求（如 favicon）
+    if not any(hls_file.endswith(ext) for ext in (".ts", ".m4s", ".m3u8", ".mp4", ".m4v")):
+        raise HTTPException(status_code=404)
+    return _proxy_media(f"{job_id}/{hls_file}")
 
 
 @router.post("/{job_id}/stop")
@@ -653,6 +736,15 @@ def stop_infer_stream(job_id: str) -> dict:
         snapshot = job_manager.stop_job(job_id)
     except KeyError:
         raise HTTPException(status_code=404, detail="job not found")
+    # 关闭 HLS 推流
+    job = job_manager.get_job(job_id)
+    if job is not None:
+        hls_pub = getattr(job, "rtsp_publisher", None)
+        if hls_pub is not None:
+            try:
+                hls_pub.close()
+            except Exception:
+                logger.exception("HLS publisher close failed job_id=%s", job_id)
     try:
         rows = scene_config_db.mark_stopped_by_job_id(job_id)
         if rows:
